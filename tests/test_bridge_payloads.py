@@ -24,6 +24,7 @@ from src.codex_openai_bridge import (
     redact_sensitive,
     read_secret_value,
     responses_result,
+    responses_usage_from_codex,
 )
 
 
@@ -45,11 +46,38 @@ class BridgePayloadTests(unittest.TestCase):
         }
         self.assertEqual(build_prompt_from_responses(payload), "SYSTEM:\nSystemtext\n\nUSER:\nAufgabe")
 
+    def test_build_prompt_from_responses_accepts_plain_message_items(self):
+        payload = {
+            "input": [
+                {"role": "user", "content": [{"type": "input_text", "text": "Frage"}]},
+                {"role": "assistant", "content": [{"type": "output_text", "text": "Zwischenantwort"}]},
+                {"role": "user", "content": [{"type": "image_url", "image_url": {"url": "https://example.invalid/a.png"}}]},
+            ],
+        }
+        self.assertEqual(
+            build_prompt_from_responses(payload),
+            "USER:\nFrage\n\nASSISTANT:\nZwischenantwort\n\nUSER:\n[Bildinhalt]",
+        )
+
     def test_responses_result_shape(self):
         result = responses_result("resp_1", "msg_1", "coder", "Hallo", 123)
         self.assertEqual(result["object"], "response")
         self.assertEqual(result["status"], "completed")
         self.assertEqual(result["output"][0]["content"][0]["text"], "Hallo")
+
+    def test_responses_result_uses_codex_usage(self):
+        usage = responses_usage_from_codex(
+            {
+                "input_tokens": 10,
+                "cached_input_tokens": 4,
+                "output_tokens": 7,
+                "reasoning_output_tokens": 3,
+            }
+        )
+        result = responses_result("resp_1", "msg_1", "coder", "Hallo", 123, usage)
+        self.assertEqual(result["usage"]["input_tokens"], 10)
+        self.assertEqual(result["usage"]["output_tokens_details"]["reasoning_tokens"], 3)
+        self.assertEqual(result["usage"]["input_tokens_details"]["cached_tokens"], 4)
 
     def test_read_secret_value_from_file(self):
         with tempfile.TemporaryDirectory() as tmp_dir:

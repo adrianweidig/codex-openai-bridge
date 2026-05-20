@@ -53,6 +53,7 @@ class VisibleDelta:
 class CodexRunResult:
     text: str
     agent_messages: list[str]
+    usage: dict[str, Any] | None = None
 
 
 TOKEN_PATTERNS = [
@@ -276,7 +277,8 @@ def map_codex_json_event(event: dict[str, Any]) -> list[VisibleDelta]:
         usage = event.get("usage") if isinstance(event.get("usage"), dict) else {}
         input_tokens = usage.get("input_tokens")
         output_tokens = usage.get("output_tokens")
-        reasoning_tokens = usage.get("reasoning_output_tokens")
+        output_token_details = usage.get("output_tokens_details") if isinstance(usage.get("output_tokens_details"), dict) else {}
+        reasoning_tokens = usage.get("reasoning_output_tokens", output_token_details.get("reasoning_tokens"))
         if input_tokens is not None and output_tokens is not None:
             return [
                 VisibleDelta(
@@ -386,7 +388,7 @@ def build_prompt(messages: list[dict[str, Any]]) -> str:
             text_parts = []
             for item in content:
                 if isinstance(item, dict):
-                    if item.get("type") in {"text", "input_text"}:
+                    if item.get("type") in {"text", "input_text", "output_text"}:
                         text_parts.append(str(item.get("text") or ""))
                 else:
                     text_parts.append(str(item))
@@ -398,13 +400,21 @@ def build_prompt(messages: list[dict[str, Any]]) -> str:
 def text_from_content(content: Any) -> str:
     if isinstance(content, str):
         return content
+    if isinstance(content, dict):
+        if "content" in content and ("role" in content or content.get("type") == "message"):
+            return text_from_content(content.get("content", ""))
+        if content.get("type") in {"text", "input_text", "output_text"}:
+            return str(content.get("text") or "")
+        if content.get("type") in {"input_image", "image_url"}:
+            return "[Bildinhalt]"
+        return str(content) if content else ""
     if isinstance(content, list):
         text_parts = []
         for item in content:
             if isinstance(item, dict):
                 if item.get("type") in {"text", "input_text", "output_text"}:
                     text_parts.append(str(item.get("text") or ""))
-                elif item.get("type") == "input_image":
+                elif item.get("type") in {"input_image", "image_url"}:
                     text_parts.append("[Bildinhalt]")
             else:
                 text_parts.append(str(item))
@@ -418,7 +428,7 @@ def build_prompt_from_responses(payload: dict[str, Any]) -> str:
     if instructions:
         parts.append(f"SYSTEM:\n{instructions}")
 
-    input_value = payload.get("input", "")
+    input_value = payload.get("input", payload.get("messages", ""))
     if isinstance(input_value, str):
         if input_value.strip():
             parts.append(f"USER:\n{input_value}")
@@ -431,7 +441,7 @@ def build_prompt_from_responses(payload: dict[str, Any]) -> str:
                 continue
 
             item_type = item.get("type")
-            if item_type == "message":
+            if item_type == "message" or ("role" in item and "content" in item):
                 role = str(item.get("role") or "user").upper()
                 text = text_from_content(item.get("content", ""))
                 if text:
@@ -621,6 +631,7 @@ def run_codex(
         active_readers = len(readers)
         current_activity = "Codex initialisiert die Ausführung"
         agent_messages: list[str] = []
+        response_usage: dict[str, Any] | None = None
         last_visible_text = ""
         last_visible_at = started_at
 
@@ -676,6 +687,8 @@ def run_codex(
                     log_event("codex.json_warning", request_id=request_id, chars=len(line))
                 if isinstance(codex_event, dict):
                     event_type = str(codex_event.get("type") or "")
+                    if event_type == "turn.completed" and isinstance(codex_event.get("usage"), dict):
+                        response_usage = codex_event["usage"]
                     deltas = map_codex_json_event(codex_event)
                     message = "\n".join(delta.text for delta in deltas if delta.text)
                     message_preview = message.split("\n", 1)[0] if message else None
@@ -733,7 +746,7 @@ def run_codex(
             elapsed_seconds=elapsed,
             output_chars=len(text),
         )
-        return CodexRunResult(text=text, agent_messages=agent_messages)
+        return CodexRunResult(text=text, agent_messages=agent_messages, usage=response_usage)
     finally:
         if process is not None and process.poll() is None:
             stop_process(process, request_id, "cleanup")
@@ -753,6 +766,36 @@ def final_text_was_streamed(text: str, agent_messages: list[str]) -> bool:
     if not normalized:
         return True
     return any(normalize_for_duplicate_check(message) == normalized for message in agent_messages)
+
+
+def int_token_value(value: Any) -> int:
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        return 0
+    return max(0, number)
+
+
+def responses_usage_from_codex(usage: dict[str, Any] | None) -> dict[str, Any]:
+    if not isinstance(usage, dict):
+        return {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
+    output_details = usage.get("output_tokens_details") if isinstance(usage.get("output_tokens_details"), dict) else {}
+    input_details = usage.get("input_tokens_details") if isinstance(usage.get("input_tokens_details"), dict) else {}
+    input_tokens = int_token_value(usage.get("input_tokens"))
+    output_tokens = int_token_value(usage.get("output_tokens"))
+    total_tokens = int_token_value(usage.get("total_tokens")) or input_tokens + output_tokens
+    result: dict[str, Any] = {
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+        "total_tokens": total_tokens,
+    }
+    reasoning_tokens = int_token_value(usage.get("reasoning_output_tokens", output_details.get("reasoning_tokens")))
+    if reasoning_tokens:
+        result["output_tokens_details"] = {"reasoning_tokens": reasoning_tokens}
+    cached_tokens = int_token_value(usage.get("cached_input_tokens", input_details.get("cached_tokens")))
+    if cached_tokens:
+        result["input_tokens_details"] = {"cached_tokens": cached_tokens}
+    return result
 
 
 def chat_completion_response(completion_id: str, model: str, text: str, created: int) -> dict[str, Any]:
@@ -782,7 +825,14 @@ def responses_message_item(message_id: str, text: str, status: str = "completed"
     }
 
 
-def responses_result(response_id: str, message_id: str, model: str, text: str, created: int) -> dict[str, Any]:
+def responses_result(
+    response_id: str,
+    message_id: str,
+    model: str,
+    text: str,
+    created: int,
+    usage: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     output = [responses_message_item(message_id, text)]
     return {
         "id": response_id,
@@ -792,7 +842,7 @@ def responses_result(response_id: str, message_id: str, model: str, text: str, c
         "model": model,
         "output": output,
         "output_text": text,
-        "usage": {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0},
+        "usage": responses_usage_from_codex(usage),
     }
 
 
@@ -1071,6 +1121,7 @@ class CodexBridgeHandler(BaseHTTPRequestHandler):
             self._sse_event(
                 {
                     "type": "response.content_part.added",
+                    "item_id": message_id,
                     "output_index": 0,
                     "content_index": 0,
                     "part": {"type": "output_text", "text": "", "annotations": []},
@@ -1086,6 +1137,7 @@ class CodexBridgeHandler(BaseHTTPRequestHandler):
                 self._sse_event(
                     {
                         "type": "response.output_text.delta",
+                        "item_id": message_id,
                         "output_index": 0,
                         "content_index": 0,
                         "delta": delta,
@@ -1117,6 +1169,7 @@ class CodexBridgeHandler(BaseHTTPRequestHandler):
                 self._sse_event(
                     {
                         "type": "response.output_text.delta",
+                        "item_id": message_id,
                         "output_index": 0,
                         "content_index": 0,
                         "delta": error_text,
@@ -1125,6 +1178,7 @@ class CodexBridgeHandler(BaseHTTPRequestHandler):
                 self._sse_event(
                     {
                         "type": "response.output_text.done",
+                        "item_id": message_id,
                         "output_index": 0,
                         "content_index": 0,
                         "text": error_text,
@@ -1133,6 +1187,7 @@ class CodexBridgeHandler(BaseHTTPRequestHandler):
                 self._sse_event(
                     {
                         "type": "response.content_part.done",
+                        "item_id": message_id,
                         "output_index": 0,
                         "content_index": 0,
                         "part": final_part,
@@ -1157,6 +1212,7 @@ class CodexBridgeHandler(BaseHTTPRequestHandler):
                     self._sse_event(
                         {
                             "type": "response.output_text.delta",
+                            "item_id": message_id,
                             "output_index": 0,
                             "content_index": 0,
                             "delta": chunk,
@@ -1168,6 +1224,7 @@ class CodexBridgeHandler(BaseHTTPRequestHandler):
             self._sse_event(
                 {
                     "type": "response.output_text.done",
+                    "item_id": message_id,
                     "output_index": 0,
                     "content_index": 0,
                     "text": visible_text,
@@ -1176,6 +1233,7 @@ class CodexBridgeHandler(BaseHTTPRequestHandler):
             self._sse_event(
                 {
                     "type": "response.content_part.done",
+                    "item_id": message_id,
                     "output_index": 0,
                     "content_index": 0,
                     "part": final_part,
@@ -1185,7 +1243,7 @@ class CodexBridgeHandler(BaseHTTPRequestHandler):
             self._sse_event(
                 {
                     "type": "response.completed",
-                    "response": responses_result(response_id, message_id, model, visible_text, created),
+                    "response": responses_result(response_id, message_id, model, visible_text, created, result.usage),
                 }
             )
             self._write_done()
@@ -1202,7 +1260,7 @@ class CodexBridgeHandler(BaseHTTPRequestHandler):
             request_id=request_id,
             progress_interval=self.server.progress_interval,
         )
-        self._json_response(200, responses_result(response_id, message_id, model, result.text, created))
+        self._json_response(200, responses_result(response_id, message_id, model, result.text, created, result.usage))
 
     def do_POST(self) -> None:  # noqa: N802
         path = self.path.rstrip("/")
