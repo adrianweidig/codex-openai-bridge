@@ -1,6 +1,9 @@
 import unittest
 
-from src.codex_openai_bridge import build_prompt_from_responses, parse_model_list, responses_result
+import tempfile
+from pathlib import Path
+
+from src.codex_openai_bridge import build_prompt_from_responses, parse_model_list, read_secret_value, responses_result
 
 
 class BridgePayloadTests(unittest.TestCase):
@@ -26,6 +29,13 @@ class BridgePayloadTests(unittest.TestCase):
         self.assertEqual(result["object"], "response")
         self.assertEqual(result["status"], "completed")
         self.assertEqual(result["output"][0]["content"][0]["text"], "Hallo")
+
+    def test_read_secret_value_from_file(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            path = Path(tmp_dir) / "secret"
+            path.write_text("abc123\n", encoding="utf-8")
+            self.assertEqual(read_secret_value(None, str(path)), "abc123")
+            self.assertEqual(read_secret_value("direct", str(path)), "direct")
 
 
 if __name__ == "__main__":

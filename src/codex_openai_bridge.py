@@ -37,6 +37,17 @@ def parse_model_list(value: str | None) -> list[str] | None:
     return models or None
 
 
+def read_secret_value(value: str | None, file_value: str | None) -> str | None:
+    if value:
+        return value
+    if not file_value:
+        return None
+    path = Path(file_value)
+    if not path.exists():
+        raise FileNotFoundError(f"Secret file not found: {path}")
+    return path.read_text(encoding="utf-8").strip()
+
+
 def build_prompt(messages: list[dict[str, Any]]) -> str:
     parts: list[str] = []
     for message in messages:
@@ -502,7 +513,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--codex-timeout", type=int, default=int(os.getenv("CODEX_BRIDGE_TIMEOUT", "900")))
     parser.add_argument("--codex-command", default=os.getenv("CODEX_BRIDGE_CODEX_COMMAND"))
     parser.add_argument("--windows-codex", action="store_true", default=is_truthy(os.getenv("CODEX_BRIDGE_WINDOWS_CODEX")))
-    parser.add_argument("--api-key", default=os.getenv("CODEX_BRIDGE_API_KEY"))
+    parser.add_argument(
+        "--api-key",
+        default=read_secret_value(os.getenv("CODEX_BRIDGE_API_KEY"), os.getenv("CODEX_BRIDGE_API_KEY_FILE")),
+    )
     parser.add_argument("--workdir", default=os.getenv("CODEX_BRIDGE_WORKDIR", str(Path(__file__).resolve().parents[1])))
     parser.add_argument("--verbose", action="store_true")
     return parser.parse_args()

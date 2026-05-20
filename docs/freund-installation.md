@@ -37,7 +37,7 @@ Der Installer fragt ab:
 - ob `codex login` im Container ausgeführt werden soll
 - ob der Provider automatisch in OpenWebUI registriert werden soll
 
-Der OpenWebUI-Admin-API-Key wird nur für die Registrierung abgefragt und nicht in `.env` gespeichert.
+Der Bridge-API-Key wird in `.env` und als lokale Secret-Datei unter `secrets/codex_bridge_api_key` abgelegt. Der Container bekommt nur `/run/secrets/codex_bridge_api_key` gemountet. Der OpenWebUI-Admin-API-Key wird nur für die Registrierung abgefragt und nicht in `.env` gespeichert.
 
 ## Nach der Installation
 
@@ -71,7 +71,7 @@ http://codex-openai-bridge:4010/v1
 Wer den Service direkt in seinen OpenWebUI-Stack kopieren will, kann `examples/openwebui_stack.override.yml` als Vorlage nutzen. Wichtig sind:
 
 - gleiches Docker-Netz wie OpenWebUI
-- `CODEX_BRIDGE_API_KEY` als Secret/Environment-Wert
+- `CODEX_BRIDGE_API_KEY_FILE` als Secret-Dateipfad, z. B. `/run/secrets/codex_bridge_api_key`
 - persistentes Volume für `/home/codex/.codex`
 - Provider-URL in OpenWebUI: `http://codex-openai-bridge:4010/v1`
 - Provider-API-Typ: `responses`

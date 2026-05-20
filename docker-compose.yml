@@ -10,9 +10,11 @@ services:
       CODEX_BRIDGE_HOST: 0.0.0.0
       CODEX_BRIDGE_PORT: 4010
       CODEX_BRIDGE_WORKDIR: /workspace
-      CODEX_BRIDGE_API_KEY: ${CODEX_BRIDGE_API_KEY:-}
+      CODEX_BRIDGE_API_KEY_FILE: /run/secrets/codex_bridge_api_key
       CODEX_BRIDGE_MODELS: ${CODEX_BRIDGE_MODELS:-coder,codex,gpt-5.5,gpt-5.4,gpt-5.4-mini,gpt-5.3-codex,gpt-5.3-codex-spark}
       CODEX_BRIDGE_TIMEOUT: ${CODEX_BRIDGE_TIMEOUT:-900}
+    secrets:
+      - codex_bridge_api_key
     ports:
       - "${CODEX_BRIDGE_PUBLISHED_PORT:-4010}:4010"
     volumes:
@@ -23,6 +25,10 @@ services:
 
 volumes:
   codex_home:
+
+secrets:
+  codex_bridge_api_key:
+    file: ${CODEX_BRIDGE_SECRET_FILE:-./secrets/codex_bridge_api_key}
 
 networks:
   openwebui_ai_net:

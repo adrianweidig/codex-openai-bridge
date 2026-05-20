@@ -4,6 +4,8 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ENV_FILE="${ROOT_DIR}/.env"
 COMPOSE_FILE="${ROOT_DIR}/docker-compose.generated.yml"
+SECRETS_DIR="${ROOT_DIR}/secrets"
+SECRET_FILE="${SECRETS_DIR}/codex_bridge_api_key"
 
 DEFAULT_MODELS="coder,codex,gpt-5.5,gpt-5.4,gpt-5.4-mini,gpt-5.3-codex,gpt-5.3-codex-spark"
 
@@ -85,9 +87,20 @@ CODEX_BRIDGE_PUBLISHED_PORT=${CODEX_BRIDGE_PUBLISHED_PORT}
 OPENWEBUI_DOCKER_NETWORK=${OPENWEBUI_DOCKER_NETWORK}
 CODEX_BRIDGE_MODELS=${CODEX_BRIDGE_MODELS}
 CODEX_BRIDGE_TIMEOUT=${CODEX_BRIDGE_TIMEOUT}
+CODEX_BRIDGE_SECRET_FILE=${SECRET_FILE}
 OPENWEBUI_BASE_URL=${OPENWEBUI_BASE_URL}
 CODEX_BRIDGE_OPENWEBUI_URL=${CODEX_BRIDGE_OPENWEBUI_URL}
 EOF
+}
+
+write_secret_file() {
+  mkdir -p "$SECRETS_DIR"
+  chmod 700 "$SECRETS_DIR"
+  if [ -f "$SECRET_FILE" ]; then
+    cp "$SECRET_FILE" "${SECRET_FILE}.bak.$(date +%Y%m%d%H%M%S)"
+  fi
+  umask 077
+  printf '%s\n' "$CODEX_BRIDGE_API_KEY" >"$SECRET_FILE"
 }
 
 write_compose_file() {
@@ -107,9 +120,11 @@ services:
       CODEX_BRIDGE_HOST: 0.0.0.0
       CODEX_BRIDGE_PORT: 4010
       CODEX_BRIDGE_WORKDIR: /workspace
-      CODEX_BRIDGE_API_KEY: ${CODEX_BRIDGE_API_KEY}
+      CODEX_BRIDGE_API_KEY_FILE: /run/secrets/codex_bridge_api_key
       CODEX_BRIDGE_MODELS: ${CODEX_BRIDGE_MODELS}
       CODEX_BRIDGE_TIMEOUT: ${CODEX_BRIDGE_TIMEOUT:-900}
+    secrets:
+      - codex_bridge_api_key
     ports:
       - "${CODEX_BRIDGE_PUBLISHED_PORT:-4010}:4010"
     volumes:
@@ -121,6 +136,10 @@ services:
 volumes:
   codex_home:
   codex_bridge_workspace:
+
+secrets:
+  codex_bridge_api_key:
+    file: ${CODEX_BRIDGE_SECRET_FILE}
 
 networks:
   openwebui_network:
@@ -178,9 +197,11 @@ CODEX_BRIDGE_API_KEY="$(prompt_default 'Lokaler Bridge-API-Key für OpenWebUI Pr
 
 print_step "Dateien erzeugen"
 write_env_file
+write_secret_file
 write_compose_file
 mkdir -p "${ROOT_DIR}/workspace"
 printf 'Erzeugt: %s\n' "$ENV_FILE"
+printf 'Erzeugt: %s\n' "$SECRET_FILE"
 printf 'Erzeugt: %s\n' "$COMPOSE_FILE"
 
 print_step "Compose prüfen"

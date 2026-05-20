@@ -11,6 +11,10 @@ from urllib.request import Request, urlopen
 DEFAULT_MODELS = "coder,codex,gpt-5.5,gpt-5.4,gpt-5.4-mini,gpt-5.3-codex,gpt-5.3-codex-spark"
 
 
+def normalize_base_url(url: str) -> str:
+    return url.strip().rstrip("/")
+
+
 def request_json(method: str, url: str, token: str, payload: dict[str, Any] | None = None) -> Any:
     body = json.dumps(payload).encode("utf-8") if payload is not None else None
     headers = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
@@ -37,24 +41,34 @@ def main() -> int:
     if not args.admin_token:
         raise SystemExit("Set OPENWEBUI_ADMIN_TOKEN or pass --admin-token.")
 
-    base_url = args.openwebui_url.rstrip("/")
-    bridge_url = args.bridge_url.rstrip("/")
+    base_url = normalize_base_url(args.openwebui_url)
+    bridge_url = normalize_base_url(args.bridge_url)
     models = [item.strip() for item in args.models.split(",") if item.strip()]
 
     config = request_json("GET", f"{base_url}/openai/config", args.admin_token)
-    urls = list(config.get("OPENAI_API_BASE_URLS") or [])
-    keys = list(config.get("OPENAI_API_KEYS") or [])
-    api_configs = dict(config.get("OPENAI_API_CONFIGS") or {})
+    raw_urls = list(config.get("OPENAI_API_BASE_URLS") or [])
+    raw_keys = list(config.get("OPENAI_API_KEYS") or [])
+    raw_api_configs = dict(config.get("OPENAI_API_CONFIGS") or {})
 
-    if bridge_url in urls:
-        idx = urls.index(bridge_url)
-        while len(keys) < len(urls):
-            keys.append("")
-        keys[idx] = args.bridge_api_key
-    else:
-        urls.append(bridge_url)
-        keys.append(args.bridge_api_key)
-        idx = len(urls) - 1
+    urls: list[str] = []
+    keys: list[str] = []
+    api_configs: dict[str, Any] = {}
+    for raw_idx, raw_url in enumerate(raw_urls):
+        normalized_url = normalize_base_url(str(raw_url))
+        raw_config = raw_api_configs.get(str(raw_idx), {})
+        is_codex_bridge = raw_config.get("provider") == "codex-bridge"
+        if is_codex_bridge or normalized_url == bridge_url:
+            continue
+        if not normalized_url or normalized_url in urls:
+            continue
+        next_idx = len(urls)
+        urls.append(normalized_url)
+        keys.append(raw_keys[raw_idx] if raw_idx < len(raw_keys) else "")
+        api_configs[str(next_idx)] = raw_config
+
+    urls.append(bridge_url)
+    keys.append(args.bridge_api_key)
+    idx = len(urls) - 1
 
     api_configs[str(idx)] = {
         "enable": True,

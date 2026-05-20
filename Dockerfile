@@ -9,7 +9,10 @@ RUN apt-get update \
 
 RUN npm install -g @openai/codex@latest
 
-RUN useradd --create-home --shell /bin/bash codex \
+RUN (userdel -r node 2>/dev/null || true) \
+    && (groupdel node 2>/dev/null || true) \
+    && groupadd --gid 1000 codex \
+    && useradd --uid 1000 --gid 1000 --create-home --shell /bin/bash codex \
     && mkdir -p /app /workspace /home/codex/.codex \
     && chown -R codex:codex /app /workspace /home/codex/.codex
 

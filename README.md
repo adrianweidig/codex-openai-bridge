@@ -28,6 +28,8 @@ Der Installer fragt alle notwendigen Werte ab, erzeugt `.env` und `docker-compos
 Für manuelle Nutzung kann weiterhin `.env.example` nach `.env` kopiert und Compose direkt gestartet werden:
 
 ```bash
+mkdir -p secrets
+printf '%s\n' "$CODEX_BRIDGE_API_KEY" > secrets/codex_bridge_api_key
 docker compose up -d --build
 ```
 
@@ -88,6 +90,8 @@ Die Liste kann über `CODEX_BRIDGE_MODELS` überschrieben werden.
 
 - Keine Secrets in Git schreiben.
 - `CODEX_BRIDGE_API_KEY` ist optional, sollte im OpenWebUI-Netz aber gesetzt werden.
+- Alternativ kann `CODEX_BRIDGE_API_KEY_FILE` auf eine Docker-Secret-Datei zeigen, z. B. `/run/secrets/codex_bridge_api_key`.
+- Der Installer schreibt den Bridge-Key zusätzlich in `secrets/codex_bridge_api_key`; der Container bekommt nur den Secret-Dateipfad.
 - Das Codex-Login liegt im Docker-Volume `codex_home` oder in einem explizit gemounteten `CODEX_HOME`.
 - Der Service führt `codex exec` aus. Das ist für lokale Tests gedacht und sollte nicht ungeschützt ins öffentliche Netz gestellt werden.
 
@@ -96,7 +100,7 @@ Die Liste kann über `CODEX_BRIDGE_MODELS` überschrieben werden.
 ```bash
 python -m py_compile src/codex_openai_bridge.py scripts/configure_openwebui_provider.py
 python -m unittest discover -s tests
-docker compose config
+CODEX_BRIDGE_SECRET_FILE=/dev/null docker compose config
 docker build -t codex-openai-bridge:dev .
 bash -n install.sh
 ```
