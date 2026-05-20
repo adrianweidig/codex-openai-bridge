@@ -6,6 +6,7 @@ from pathlib import Path
 from src.codex_openai_bridge import (
     build_prompt_from_responses,
     codex_json_event_message,
+    compress_output,
     parse_model_list,
     public_codex_log_line,
     read_secret_value,
@@ -59,11 +60,33 @@ class BridgePayloadTests(unittest.TestCase):
                     "item": {"type": "command_execution", "command": "/bin/bash -lc ls"},
                 }
             ),
-            "führt Shell-Befehl aus: `/bin/bash -lc ls`.",
+            "$ /bin/bash -lc ls",
+        )
+        self.assertIn(
+            "Ausgabe:",
+            codex_json_event_message(
+                {
+                    "type": "item.completed",
+                    "item": {
+                        "type": "command_execution",
+                        "command": "/bin/bash -lc ls",
+                        "aggregated_output": "a.txt\nb.txt\n",
+                        "exit_code": 0,
+                        "status": "completed",
+                    },
+                }
+            ),
         )
         self.assertIsNone(
             codex_json_event_message({"type": "item.completed", "item": {"type": "agent_message", "text": "OK"}})
         )
+
+    def test_compress_output_omits_middle(self):
+        output = "\n".join(f"line-{i}" for i in range(60))
+        compressed = compress_output(output, max_lines=10)
+        self.assertIn("Zeilen ausgelassen", compressed)
+        self.assertIn("line-0", compressed)
+        self.assertIn("line-59", compressed)
 
 
 if __name__ == "__main__":

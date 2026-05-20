@@ -5,6 +5,7 @@ import argparse
 import json
 import os
 import queue
+import signal
 import shutil
 import subprocess
 import tempfile
@@ -32,6 +33,10 @@ DEFAULT_MODELS = [
 ]
 
 
+class ClientDisconnected(Exception):
+    pass
+
+
 def log_event(event: str, **fields: Any) -> None:
     record: dict[str, Any] = {
         "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
@@ -48,6 +53,32 @@ def sanitize_log_line(value: str, max_length: int = 1200) -> str:
     if len(clean) <= max_length:
         return clean
     return clean[: max_length - 1] + "…"
+
+
+def compress_output(value: str, max_chars: int = 1800, max_lines: int = 40) -> str:
+    clean = value.replace("\r", "").strip()
+    if not clean:
+        return ""
+    lines = clean.splitlines()
+    omitted_lines = max(0, len(lines) - max_lines)
+    if omitted_lines:
+        head_count = max_lines // 2
+        tail_count = max_lines - head_count
+        lines = lines[:head_count] + [f"... {omitted_lines} Zeilen ausgelassen ..."] + lines[-tail_count:]
+    compact = "\n".join(lines)
+    if len(compact) <= max_chars:
+        return compact
+    omitted_chars = len(compact) - max_chars
+    head_count = max_chars // 2
+    tail_count = max_chars - head_count
+    return compact[:head_count].rstrip() + f"\n... {omitted_chars} Zeichen ausgelassen ...\n" + compact[-tail_count:].lstrip()
+
+
+def command_output_block(value: str) -> str:
+    compact = compress_output(value)
+    if not compact:
+        return ""
+    return f"\nAusgabe:\n```text\n{compact}\n```"
 
 
 def public_codex_log_line(stream_name: str, line: str) -> str | None:
@@ -103,14 +134,19 @@ def codex_json_event_message(event: dict[str, Any]) -> str | None:
 
     item_type = str(item.get("type") or "")
     status = str(item.get("status") or "")
+    if item_type == "reasoning":
+        if event_type == "item.started":
+            return "denkt nach."
+        return "Denkschritt abgeschlossen."
     if item_type == "command_execution":
         command = sanitize_log_line(str(item.get("command") or "Shell-Befehl"), 220)
         if event_type == "item.started":
-            return f"führt Shell-Befehl aus: `{command}`."
+            return f"$ {command}"
         exit_code = item.get("exit_code")
+        output = command_output_block(str(item.get("aggregated_output") or ""))
         if status == "failed" or (isinstance(exit_code, int) and exit_code != 0):
-            return f"Shell-Befehl fehlgeschlagen (Exit {exit_code}): `{command}`."
-        return f"Shell-Befehl abgeschlossen (Exit {exit_code}): `{command}`."
+            return f"Befehl fehlgeschlagen (Exit {exit_code}): `{command}`.{output}"
+        return f"Befehl abgeschlossen (Exit {exit_code}): `{command}`.{output}"
 
     if item_type in {"tool_call", "function_call"}:
         name = sanitize_log_line(str(item.get("name") or item.get("tool_name") or "Tool"), 160)
@@ -265,6 +301,27 @@ def resolve_codex_command(command: str | None, use_windows_codex: bool) -> list[
     return [shutil.which("codex") or "codex"]
 
 
+def stop_process(process: subprocess.Popen[str], request_id: str, reason: str) -> None:
+    if process.poll() is not None:
+        return
+    try:
+        if os.name != "nt":
+            os.killpg(process.pid, signal.SIGTERM)
+        else:
+            process.terminate()
+        try:
+            process.wait(timeout=3)
+        except subprocess.TimeoutExpired:
+            if os.name != "nt":
+                os.killpg(process.pid, signal.SIGKILL)
+            else:
+                process.kill()
+    except ProcessLookupError:
+        pass
+    finally:
+        log_event("codex.stopped", request_id=request_id, reason=reason)
+
+
 def run_codex(
     prompt: str,
     model: str,
@@ -288,6 +345,7 @@ def run_codex(
     with tempfile.NamedTemporaryFile(delete=False, suffix=".txt", dir=temp_dir) as output:
         output_path = Path(output.name)
         output_arg = str(wslpath(output_path, "-w")) if use_windows_codex else str(output_path)
+    process: subprocess.Popen[str] | None = None
     try:
         command = [
             *resolve_codex_command(codex_command, use_windows_codex),
@@ -330,6 +388,7 @@ def run_codex(
             stderr=subprocess.PIPE,
             text=True,
             bufsize=1,
+            start_new_session=os.name != "nt" and not use_windows_codex,
         )
 
         output_queue: queue.Queue[tuple[str, str | None]] = queue.Queue()
@@ -364,8 +423,8 @@ def run_codex(
         while active_readers:
             now = time.monotonic()
             if process.poll() is None and now - started_at > timeout:
-                process.kill()
                 elapsed = round(now - started_at, 1)
+                stop_process(process, request_id, "timeout")
                 log_event("codex.timeout", request_id=request_id, elapsed_seconds=elapsed)
                 raise TimeoutError(f"codex exec timed out after {timeout} seconds")
 
@@ -375,9 +434,9 @@ def run_codex(
                     progress_callback(f"läuft seit {elapsed}s; Codex verarbeitet die Anfrage noch.")
                 except (BrokenPipeError, ConnectionResetError, OSError):
                     if process.poll() is None:
-                        process.kill()
+                        stop_process(process, request_id, "client_disconnected")
                     log_event("client.disconnected", request_id=request_id, elapsed_seconds=elapsed)
-                    raise
+                    raise ClientDisconnected()
                 log_event("codex.progress", request_id=request_id, elapsed_seconds=elapsed)
                 next_progress = now + max(1, progress_interval)
 
@@ -416,10 +475,10 @@ def run_codex(
                             progress_callback(message)
                         except (BrokenPipeError, ConnectionResetError, OSError):
                             if process.poll() is None:
-                                process.kill()
+                                stop_process(process, request_id, "client_disconnected")
                             elapsed = int(time.monotonic() - started_at)
                             log_event("client.disconnected", request_id=request_id, elapsed_seconds=elapsed)
-                            raise
+                            raise ClientDisconnected()
                     continue
 
             public_line = public_codex_log_line(stream_name, line)
@@ -446,6 +505,8 @@ def run_codex(
             progress_callback(f"abgeschlossen nach {elapsed}s; übertrage Antwort.")
         return text
     finally:
+        if process is not None and process.poll() is None:
+            stop_process(process, request_id, "cleanup")
         output_path.unlink(missing_ok=True)
 
 
@@ -503,7 +564,10 @@ class CodexBridgeHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
-        self.wfile.write(body)
+        try:
+            self.wfile.write(body)
+        except (BrokenPipeError, ConnectionResetError, OSError) as exc:
+            raise ClientDisconnected() from exc
 
     def _read_json(self) -> dict[str, Any]:
         length = int(self.headers.get("Content-Length") or "0")
@@ -549,10 +613,20 @@ class CodexBridgeHandler(BaseHTTPRequestHandler):
 
     def _sse_event(self, payload: Any) -> None:
         event_type = payload.get("type") if isinstance(payload, dict) else None
-        if event_type:
-            self.wfile.write(f"event: {event_type}\n".encode("utf-8"))
-        self.wfile.write(f"data: {json.dumps(payload, ensure_ascii=False)}\n\n".encode("utf-8"))
-        self.wfile.flush()
+        try:
+            if event_type:
+                self.wfile.write(f"event: {event_type}\n".encode("utf-8"))
+            self.wfile.write(f"data: {json.dumps(payload, ensure_ascii=False)}\n\n".encode("utf-8"))
+            self.wfile.flush()
+        except (BrokenPipeError, ConnectionResetError, OSError) as exc:
+            raise ClientDisconnected() from exc
+
+    def _write_done(self) -> None:
+        try:
+            self.wfile.write(b"data: [DONE]\n\n")
+            self.wfile.flush()
+        except (BrokenPipeError, ConnectionResetError, OSError) as exc:
+            raise ClientDisconnected() from exc
 
     def _chat_completions(self, payload: dict[str, Any]) -> None:
         model = str(payload.get("model") or "coder")
@@ -606,6 +680,8 @@ class CodexBridgeHandler(BaseHTTPRequestHandler):
                     progress_callback=send_progress,
                     progress_interval=self.server.progress_interval,
                 )
+            except ClientDisconnected:
+                raise
             except Exception as exc:
                 error_text = f"[Codex] Fehler: {exc}\n"
                 self._sse_event(
@@ -626,7 +702,7 @@ class CodexBridgeHandler(BaseHTTPRequestHandler):
                         "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
                     }
                 )
-                self.wfile.write(b"data: [DONE]\n\n")
+                self._write_done()
                 return
 
             for chunk in chunk_text(text):
@@ -648,7 +724,7 @@ class CodexBridgeHandler(BaseHTTPRequestHandler):
                     "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
                 }
             )
-            self.wfile.write(b"data: [DONE]\n\n")
+            self._write_done()
             return
         text = run_codex(
             prompt,
@@ -738,6 +814,8 @@ class CodexBridgeHandler(BaseHTTPRequestHandler):
                     progress_callback=send_progress,
                     progress_interval=self.server.progress_interval,
                 )
+            except ClientDisconnected:
+                raise
             except Exception as exc:
                 error_text = f"[Codex] Fehler: {exc}\n"
                 final_part = {"type": "output_text", "text": error_text, "annotations": []}
@@ -776,7 +854,7 @@ class CodexBridgeHandler(BaseHTTPRequestHandler):
                         },
                     }
                 )
-                self.wfile.write(b"data: [DONE]\n\n")
+                self._write_done()
                 return
 
             for chunk in chunk_text(text):
@@ -814,7 +892,7 @@ class CodexBridgeHandler(BaseHTTPRequestHandler):
                     "response": responses_result(response_id, message_id, model, visible_text, created),
                 }
             )
-            self.wfile.write(b"data: [DONE]\n\n")
+            self._write_done()
             return
         text = run_codex(
             prompt,
@@ -854,6 +932,9 @@ class CodexBridgeHandler(BaseHTTPRequestHandler):
             else:
                 self._chat_completions(payload)
             log_event("request.done", request_id=request_id, path=path)
+        except ClientDisconnected:
+            log_event("request.client_disconnected", path=path)
+            return
         except Exception as exc:
             log_event("request.failed", path=path, error=str(exc))
             self._json_response(500, {"error": {"message": str(exc), "type": "codex_bridge_error"}})

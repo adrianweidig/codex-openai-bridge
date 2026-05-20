@@ -1,13 +1,35 @@
 FROM node:24-bookworm-slim
 
+ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright \
+    NODE_PATH=/usr/local/lib/node_modules
+
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
+        bash \
+        bubblewrap \
+        build-essential \
         ca-certificates \
+        curl \
+        fd-find \
+        file \
         git \
+        jq \
+        less \
+        openssh-client \
+        pkg-config \
+        procps \
         python3 \
+        python3-pip \
+        python3-venv \
+        ripgrep \
+        unzip \
+        wget \
+        zip \
     && rm -rf /var/lib/apt/lists/*
 
-RUN npm install -g @openai/codex@latest
+RUN npm install -g @openai/codex@latest playwright@latest \
+    && playwright install --with-deps chromium \
+    && chmod -R a+rX /ms-playwright
 
 RUN (userdel -r node 2>/dev/null || true) \
     && (groupdel node 2>/dev/null || true) \
