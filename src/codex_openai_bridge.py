@@ -74,6 +74,62 @@ def public_codex_log_line(stream_name: str, line: str) -> str | None:
     return None
 
 
+def codex_json_event_message(event: dict[str, Any]) -> str | None:
+    event_type = str(event.get("type") or "")
+    if event_type == "thread.started":
+        thread_id = str(event.get("thread_id") or "")
+        short_id = thread_id[-12:] if len(thread_id) > 12 else thread_id
+        return f"Session gestartet ({short_id})." if short_id else "Session gestartet."
+    if event_type == "turn.started":
+        return "beginnt mit der Bearbeitung."
+    if event_type == "turn.completed":
+        usage = event.get("usage") if isinstance(event.get("usage"), dict) else {}
+        input_tokens = usage.get("input_tokens")
+        output_tokens = usage.get("output_tokens")
+        reasoning_tokens = usage.get("reasoning_output_tokens")
+        if input_tokens is not None and output_tokens is not None:
+            return (
+                "Bearbeitung abgeschlossen; "
+                f"Tokens: input {input_tokens}, output {output_tokens}, reasoning {reasoning_tokens or 0}."
+            )
+        return "Bearbeitung abgeschlossen."
+    if event_type in {"turn.failed", "error"}:
+        message = event.get("message") or event.get("error") or "unbekannter Fehler"
+        return f"meldet einen Fehler: {sanitize_log_line(str(message), 300)}"
+
+    item = event.get("item")
+    if not isinstance(item, dict):
+        return None
+
+    item_type = str(item.get("type") or "")
+    status = str(item.get("status") or "")
+    if item_type == "command_execution":
+        command = sanitize_log_line(str(item.get("command") or "Shell-Befehl"), 220)
+        if event_type == "item.started":
+            return f"führt Shell-Befehl aus: `{command}`."
+        exit_code = item.get("exit_code")
+        if status == "failed" or (isinstance(exit_code, int) and exit_code != 0):
+            return f"Shell-Befehl fehlgeschlagen (Exit {exit_code}): `{command}`."
+        return f"Shell-Befehl abgeschlossen (Exit {exit_code}): `{command}`."
+
+    if item_type in {"tool_call", "function_call"}:
+        name = sanitize_log_line(str(item.get("name") or item.get("tool_name") or "Tool"), 160)
+        if event_type == "item.started":
+            return f"nutzt Tool `{name}`."
+        if status:
+            return f"Tool `{name}` ist {status}."
+        return f"Tool `{name}` abgeschlossen."
+
+    if item_type == "agent_message":
+        return None
+
+    if event_type == "item.started":
+        return f"startet Schritt `{item_type or 'unbekannt'}`."
+    if event_type == "item.completed" and item_type:
+        return f"Schritt `{item_type}` abgeschlossen."
+    return None
+
+
 def parse_model_list(value: str | None) -> list[str] | None:
     if not value:
         return None
@@ -216,6 +272,8 @@ def run_codex(
     workdir: Path,
     codex_command: str | None,
     use_windows_codex: bool,
+    sandbox_mode: str,
+    bypass_sandbox: bool,
     request_id: str,
     progress_callback: Callable[[str], None] | None = None,
     progress_interval: int = 15,
@@ -234,10 +292,9 @@ def run_codex(
         command = [
             *resolve_codex_command(codex_command, use_windows_codex),
             "exec",
+            "--json",
             "--ephemeral",
             "--skip-git-repo-check",
-            "--sandbox",
-            "read-only",
             "--cd",
             workdir_arg,
             "-m",
@@ -246,6 +303,10 @@ def run_codex(
             output_arg,
             "-",
         ]
+        if bypass_sandbox:
+            command.insert(4, "--dangerously-bypass-approvals-and-sandbox")
+        else:
+            command[4:4] = ["--sandbox", sandbox_mode]
         command_label = " ".join(command[:2]) if len(command) > 1 else command[0]
         log_event(
             "codex.start",
@@ -255,6 +316,7 @@ def run_codex(
             timeout_seconds=timeout,
             workdir=str(workdir),
             command=command_label,
+            sandbox_mode="bypass" if bypass_sandbox else sandbox_mode,
             prompt_chars=len(prompt),
         )
         if progress_callback:
@@ -334,6 +396,32 @@ def run_codex(
                 stdout_tail = (stdout_tail + [line])[-20:]
             else:
                 stderr_tail = (stderr_tail + [line])[-20:]
+
+            if stream_name == "stdout":
+                try:
+                    codex_event = json.loads(line)
+                except json.JSONDecodeError:
+                    codex_event = None
+                if isinstance(codex_event, dict):
+                    event_type = str(codex_event.get("type") or "")
+                    message = codex_json_event_message(codex_event)
+                    log_event(
+                        "codex.event",
+                        request_id=request_id,
+                        codex_event=event_type,
+                        message=message,
+                    )
+                    if message and progress_callback:
+                        try:
+                            progress_callback(message)
+                        except (BrokenPipeError, ConnectionResetError, OSError):
+                            if process.poll() is None:
+                                process.kill()
+                            elapsed = int(time.monotonic() - started_at)
+                            log_event("client.disconnected", request_id=request_id, elapsed_seconds=elapsed)
+                            raise
+                    continue
+
             public_line = public_codex_log_line(stream_name, line)
             if public_line:
                 log_event("codex.output", request_id=request_id, stream=stream_name, line=public_line)
@@ -512,6 +600,8 @@ class CodexBridgeHandler(BaseHTTPRequestHandler):
                     workdir=self.server.workdir,
                     codex_command=self.server.codex_command,
                     use_windows_codex=self.server.use_windows_codex,
+                    sandbox_mode=self.server.sandbox_mode,
+                    bypass_sandbox=self.server.bypass_sandbox,
                     request_id=request_id,
                     progress_callback=send_progress,
                     progress_interval=self.server.progress_interval,
@@ -567,6 +657,8 @@ class CodexBridgeHandler(BaseHTTPRequestHandler):
             workdir=self.server.workdir,
             codex_command=self.server.codex_command,
             use_windows_codex=self.server.use_windows_codex,
+            sandbox_mode=self.server.sandbox_mode,
+            bypass_sandbox=self.server.bypass_sandbox,
             request_id=request_id,
             progress_interval=self.server.progress_interval,
         )
@@ -640,6 +732,8 @@ class CodexBridgeHandler(BaseHTTPRequestHandler):
                     workdir=self.server.workdir,
                     codex_command=self.server.codex_command,
                     use_windows_codex=self.server.use_windows_codex,
+                    sandbox_mode=self.server.sandbox_mode,
+                    bypass_sandbox=self.server.bypass_sandbox,
                     request_id=request_id,
                     progress_callback=send_progress,
                     progress_interval=self.server.progress_interval,
@@ -729,6 +823,8 @@ class CodexBridgeHandler(BaseHTTPRequestHandler):
             workdir=self.server.workdir,
             codex_command=self.server.codex_command,
             use_windows_codex=self.server.use_windows_codex,
+            sandbox_mode=self.server.sandbox_mode,
+            bypass_sandbox=self.server.bypass_sandbox,
             request_id=request_id,
             progress_interval=self.server.progress_interval,
         )
@@ -777,6 +873,8 @@ class CodexBridgeServer(ThreadingHTTPServer):
         workdir: Path,
         codex_command: str | None,
         use_windows_codex: bool,
+        sandbox_mode: str,
+        bypass_sandbox: bool,
         api_key: str | None,
         progress_interval: int,
         verbose: bool,
@@ -787,6 +885,8 @@ class CodexBridgeServer(ThreadingHTTPServer):
         self.workdir = workdir
         self.codex_command = codex_command
         self.use_windows_codex = use_windows_codex
+        self.sandbox_mode = sandbox_mode
+        self.bypass_sandbox = bypass_sandbox
         self.api_key = api_key
         self.progress_interval = progress_interval
         self.verbose = verbose
@@ -806,6 +906,13 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--codex-command", default=os.getenv("CODEX_BRIDGE_CODEX_COMMAND"))
     parser.add_argument("--windows-codex", action="store_true", default=is_truthy(os.getenv("CODEX_BRIDGE_WINDOWS_CODEX")))
+    parser.add_argument("--sandbox-mode", default=os.getenv("CODEX_BRIDGE_SANDBOX_MODE", "read-only"))
+    parser.add_argument(
+        "--bypass-sandbox",
+        action="store_true",
+        default=is_truthy(os.getenv("CODEX_BRIDGE_BYPASS_SANDBOX")),
+        help="Run Codex without its own sandbox. Intended only when the bridge container is the sandbox boundary.",
+    )
     parser.add_argument(
         "--api-key",
         default=read_secret_value(os.getenv("CODEX_BRIDGE_API_KEY"), os.getenv("CODEX_BRIDGE_API_KEY_FILE")),
@@ -826,6 +933,8 @@ def main() -> int:
         workdir=Path(args.workdir).resolve(),
         codex_command=args.codex_command,
         use_windows_codex=args.windows_codex,
+        sandbox_mode=args.sandbox_mode,
+        bypass_sandbox=args.bypass_sandbox,
         api_key=args.api_key,
         progress_interval=args.progress_interval,
         verbose=args.verbose,

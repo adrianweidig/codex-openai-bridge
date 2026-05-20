@@ -5,6 +5,7 @@ from pathlib import Path
 
 from src.codex_openai_bridge import (
     build_prompt_from_responses,
+    codex_json_event_message,
     parse_model_list,
     public_codex_log_line,
     read_secret_value,
@@ -48,6 +49,21 @@ class BridgePayloadTests(unittest.TestCase):
         self.assertIsNone(public_codex_log_line("stderr", "USER:"))
         self.assertIsNone(public_codex_log_line("stderr", "vertraulicher prompt"))
         self.assertIsNone(public_codex_log_line("stdout", "final answer"))
+
+    def test_codex_json_event_message(self):
+        self.assertEqual(codex_json_event_message({"type": "turn.started"}), "beginnt mit der Bearbeitung.")
+        self.assertEqual(
+            codex_json_event_message(
+                {
+                    "type": "item.started",
+                    "item": {"type": "command_execution", "command": "/bin/bash -lc ls"},
+                }
+            ),
+            "führt Shell-Befehl aus: `/bin/bash -lc ls`.",
+        )
+        self.assertIsNone(
+            codex_json_event_message({"type": "item.completed", "item": {"type": "agent_message", "text": "OK"}})
+        )
 
 
 if __name__ == "__main__":

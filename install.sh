@@ -88,6 +88,8 @@ OPENWEBUI_DOCKER_NETWORK=${OPENWEBUI_DOCKER_NETWORK}
 CODEX_BRIDGE_MODELS=${CODEX_BRIDGE_MODELS}
 CODEX_BRIDGE_TIMEOUT=${CODEX_BRIDGE_TIMEOUT}
 CODEX_BRIDGE_PROGRESS_INTERVAL=${CODEX_BRIDGE_PROGRESS_INTERVAL}
+CODEX_BRIDGE_SANDBOX_MODE=${CODEX_BRIDGE_SANDBOX_MODE}
+CODEX_BRIDGE_BYPASS_SANDBOX=${CODEX_BRIDGE_BYPASS_SANDBOX}
 CODEX_BRIDGE_SECRET_FILE=${SECRET_FILE}
 OPENWEBUI_BASE_URL=${OPENWEBUI_BASE_URL}
 CODEX_BRIDGE_OPENWEBUI_URL=${CODEX_BRIDGE_OPENWEBUI_URL}
@@ -125,6 +127,8 @@ services:
       CODEX_BRIDGE_MODELS: ${CODEX_BRIDGE_MODELS}
       CODEX_BRIDGE_TIMEOUT: ${CODEX_BRIDGE_TIMEOUT:-900}
       CODEX_BRIDGE_PROGRESS_INTERVAL: ${CODEX_BRIDGE_PROGRESS_INTERVAL:-15}
+      CODEX_BRIDGE_SANDBOX_MODE: ${CODEX_BRIDGE_SANDBOX_MODE:-read-only}
+      CODEX_BRIDGE_BYPASS_SANDBOX: ${CODEX_BRIDGE_BYPASS_SANDBOX:-false}
     secrets:
       - codex_bridge_api_key
     ports:
@@ -196,6 +200,12 @@ CODEX_BRIDGE_PUBLISHED_PORT="$(prompt_default 'Host-Port für Bridge-Healthcheck
 CODEX_BRIDGE_MODELS="$(prompt_default 'Kommagetrennte Modell-IDs, die die Bridge anbieten soll' "$DEFAULT_MODELS")"
 CODEX_BRIDGE_TIMEOUT="$(prompt_default 'Timeout pro Codex-Aufruf in Sekunden' '900')"
 CODEX_BRIDGE_PROGRESS_INTERVAL="$(prompt_default 'Sekunden zwischen sichtbaren Fortschrittsmeldungen im Streaming' '15')"
+CODEX_BRIDGE_SANDBOX_MODE="$(prompt_default 'Codex-Sandbox-Modus, wenn Sandbox aktiv ist' 'read-only')"
+if prompt_yes_no 'Codex-Sandbox im Container umgehen, damit Shell-/Tool-Schritte funktionieren? Nur nutzen, wenn Docker die Sicherheitsgrenze ist.' 'nein'; then
+  CODEX_BRIDGE_BYPASS_SANDBOX=true
+else
+  CODEX_BRIDGE_BYPASS_SANDBOX=false
+fi
 CODEX_BRIDGE_API_KEY="$(prompt_default 'Lokaler Bridge-API-Key für OpenWebUI Provider' "$generated_key")"
 
 print_step "Dateien erzeugen"

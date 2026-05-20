@@ -92,7 +92,7 @@ Die Liste kann über `CODEX_BRIDGE_MODELS` überschrieben werden.
 
 Die Bridge schreibt strukturierte JSON-Zeilen nach `stdout`, sichtbar über `docker logs` oder Portainer. Geloggt werden Request-Start, Codex-Start, sichere Codex-Metadaten, Heartbeats, Fehler und Abschluss. Prompt- und Antwortinhalte werden nicht in die Container-Logs geschrieben.
 
-Bei `stream=true` sendet die Bridge sofort Responses-API-SSE-Events und danach sichtbare `[Codex]`-Fortschrittsdeltas. Das Intervall wird über `CODEX_BRIDGE_PROGRESS_INTERVAL` gesteuert.
+Bei `stream=true` sendet die Bridge sofort Responses-API-SSE-Events und sichtbare `[Codex]`-Fortschrittsdeltas. Die Bridge nutzt dafür `codex exec --json` und zeigt sichere Codex-Events wie Session-Start, Bearbeitungsstart, Shell-/Tool-Schritte, Abschluss und Token-Nutzung. Versteckte Modellgedanken werden nicht offengelegt. Das Heartbeat-Intervall wird über `CODEX_BRIDGE_PROGRESS_INTERVAL` gesteuert.
 
 ## Sicherheit
 
