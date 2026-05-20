@@ -10,32 +10,41 @@ Das Repository ist für Portainer-/Docker-Compose-Setups gedacht. Es enthält ke
 - `Dockerfile`: Container mit Python, Node.js und installierter Codex CLI.
 - `docker-compose.yml`: eigenständig startbarer Bridge-Service.
 - `examples/openwebui_stack.override.yml`: Compose-Snippet für die Integration in eine bestehende OpenWebUI-Portainer-Stack-Datei.
+- `install.sh`: interaktiver Installer, der `.env`, `docker-compose.generated.yml`, Image-Build, Start und OpenWebUI-Provider-Registrierung erledigt.
 - `scripts/configure_openwebui_provider.py`: registriert den Bridge-Service in OpenWebUI als `api_type=responses`.
+- `docs/freund-installation.md`: knappe Weitergabe-Anleitung für andere Nutzer.
 - `tests/`: kleine Payload-/Schema-Tests.
 
 ## Schnellstart
 
-1. `.env.example` nach `.env` kopieren und `CODEX_BRIDGE_API_KEY` setzen.
-2. Container bauen und starten:
+Für eine neue Umgebung ist der interaktive Installer der empfohlene Weg:
+
+```bash
+bash install.sh
+```
+
+Der Installer fragt alle notwendigen Werte ab, erzeugt `.env` und `docker-compose.generated.yml`, baut das Image, startet den Container auf Wunsch und registriert den Provider optional direkt in OpenWebUI.
+
+Für manuelle Nutzung kann weiterhin `.env.example` nach `.env` kopiert und Compose direkt gestartet werden:
 
 ```bash
 docker compose up -d --build
 ```
 
-3. Codex im Container authentifizieren, falls noch kein `CODEX_HOME`-Volume mit gültiger Anmeldung vorhanden ist:
+Codex im Container authentifizieren, falls noch kein `CODEX_HOME`-Volume mit gültiger Anmeldung vorhanden ist:
 
 ```bash
 docker compose run --rm --entrypoint codex codex-openai-bridge login
 docker compose restart codex-openai-bridge
 ```
 
-4. Healthcheck prüfen:
+Healthcheck prüfen:
 
 ```bash
 curl http://localhost:4010/health
 ```
 
-5. Modelle prüfen:
+Modelle prüfen:
 
 ```bash
 curl -H "Authorization: Bearer $CODEX_BRIDGE_API_KEY" http://localhost:4010/v1/models
@@ -60,6 +69,8 @@ python scripts/configure_openwebui_provider.py \
 ```
 
 Für die bestehende `openwebui_stack`-Compose-Datei kann `examples/openwebui_stack.override.yml` als Vorlage genutzt werden. Wichtig ist, dass der Service im gleichen Netzwerk wie `open-webui` hängt.
+
+Für Weitergabe an andere Nutzer siehe [docs/freund-installation.md](docs/freund-installation.md).
 
 ## Verfügbare Modelle
 
@@ -87,4 +98,5 @@ python -m py_compile src/codex_openai_bridge.py scripts/configure_openwebui_prov
 python -m unittest discover -s tests
 docker compose config
 docker build -t codex-openai-bridge:dev .
+bash -n install.sh
 ```
