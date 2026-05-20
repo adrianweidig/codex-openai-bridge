@@ -74,6 +74,8 @@ python scripts/configure_openwebui_provider.py \
 
 Für die bestehende `openwebui_stack`-Compose-Datei kann `examples/openwebui_stack.override.yml` als Vorlage genutzt werden. Wichtig ist, dass der Service im gleichen Netzwerk wie `open-webui` hängt.
 
+Die Bridge ist stateless und implementiert keine serverseitige Verkettung über `previous_response_id`. In OpenWebUI sollte `ENABLE_RESPONSES_API_STATEFUL=false` bleiben.
+
 Für Weitergabe an andere Nutzer siehe [docs/freund-installation.md](docs/freund-installation.md).
 
 ## Verfügbare Modelle
@@ -92,7 +94,7 @@ Die Liste kann über `CODEX_BRIDGE_MODELS` überschrieben werden.
 
 Die Bridge schreibt strukturierte JSON-Zeilen nach `stdout`, sichtbar über `docker logs` oder Portainer. Geloggt werden Request-Start, Codex-Start, sichere Codex-Metadaten, Heartbeats, Fehler und Abschluss. Prompt- und Antwortinhalte werden nicht in die Container-Logs geschrieben.
 
-Bei `stream=true` sendet die Bridge sofort Responses-API-SSE-Events und sichtbare Fortschrittsdeltas. Die Bridge nutzt dafür `codex exec --json` und zeigt eine aktive Chat-Ansicht mit Session-Start, Bearbeitungsstart, Denken-Status, verständlich beschriebenen Shell-/Tool-Schritten, kompakten Ergebniszusammenfassungen, Abschluss und Token-Nutzung. Lange Codex-JSON-Events werden erst nach dem Parsen gekürzt, damit große Befehlsausgaben nicht den Live-Status zerstören. Dateilese-Ausgaben wie Skills, Prompts oder größere Markdown-Dateien werden im Chat nur als Zeilen-/Größenzusammenfassung angezeigt, nicht als kompletter Inhalt. Versteckte Modellgedanken werden nicht offengelegt; die Bridge zeigt nur sichere Statuszusammenfassungen. Wenn der Client den Chat abbricht, stoppt die Bridge den laufenden Codex-Prozess und behandelt das als normalen Abbruch. Das Heartbeat-Intervall wird über `CODEX_BRIDGE_PROGRESS_INTERVAL` gesteuert.
+Bei `stream=true` sendet die Bridge sofort Responses-API-SSE-Events und sichtbare Fortschrittsdeltas. Die Bridge nutzt dafür `codex exec --json` und übersetzt Codex-JSONL-Ereignisse in OpenWebUI-sichtbare Textdeltas: Session-Start, Bearbeitungsstart, neutrale Reasoning-Statusmeldungen, Shell-/Tool-/Datei-/Websuche-/Plan-Schritte, Agent-Nachrichten, Fehler und Token-Nutzung. Agent-Nachrichten werden als normale Assistant-Textdeltas gestreamt; die finale Antwort wird nicht doppelt angehängt, wenn Codex sie bereits als Agent-Nachricht geliefert hat. Lange Codex-JSON-Events werden erst nach dem Parsen gekürzt, damit große Befehlsausgaben nicht den Live-Status zerstören. Dateilese-Ausgaben wie Skills, Prompts oder größere Markdown-Dateien werden im Chat nur als Zeilen-/Größenzusammenfassung angezeigt, nicht als kompletter Inhalt. Secrets und tokenähnliche Werte werden redigiert. Versteckte Modellgedanken werden nicht offengelegt; die Bridge zeigt nur sichere Statuszusammenfassungen. Wenn der Client den Chat abbricht, stoppt die Bridge den laufenden Codex-Prozess und behandelt das als normalen Abbruch. Das Heartbeat-Intervall wird über `CODEX_BRIDGE_PROGRESS_INTERVAL` gesteuert; Heartbeats werden unterdrückt, solange echte Codex-Ereignisse eintreffen.
 
 Das Docker-Image enthält Werkzeuge, die Codex in typischen Container-Läufen braucht: `bash`, `bubblewrap`, `curl`, `wget`, `jq`, `ripgrep`, `fd`, `git`, Python mit `pip`/`venv`, Build-Basis sowie Playwright mit Chromium.
 

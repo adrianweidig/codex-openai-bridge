@@ -16,6 +16,7 @@ import tempfile
 import threading
 import time
 import uuid
+from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Callable
@@ -41,6 +42,28 @@ class ClientDisconnected(Exception):
     pass
 
 
+@dataclass(frozen=True)
+class VisibleDelta:
+    kind: str
+    text: str
+    update_activity: bool = True
+
+
+@dataclass(frozen=True)
+class CodexRunResult:
+    text: str
+    agent_messages: list[str]
+
+
+TOKEN_PATTERNS = [
+    re.compile(r"(?i)(authorization\s*:\s*bearer\s+)[^\s\"']+"),
+    re.compile(r"(?i)\b((?:openai|codex|bridge|api|access|refresh)[_-]?(?:api[_-]?)?(?:key|token|secret)\s*[=:]\s*)[^\s\"']+"),
+    re.compile(r"\b(?:sk-[A-Za-z0-9_-]{12,})\b"),
+    re.compile(r"\b(?:[A-Za-z0-9_-]{48,})\b"),
+]
+SENSITIVE_PATH_MARKERS = ("secret", "token", "apikey", "api_key", "auth.json", ".webui_secret_key")
+
+
 def log_event(event: str, **fields: Any) -> None:
     record: dict[str, Any] = {
         "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
@@ -53,10 +76,22 @@ def log_event(event: str, **fields: Any) -> None:
 
 
 def sanitize_log_line(value: str, max_length: int = 1200) -> str:
-    clean = value.replace("\r", "").strip()
+    clean = redact_sensitive(value).replace("\r", "").strip()
     if len(clean) <= max_length:
         return clean
     return clean[: max_length - 1] + "…"
+
+
+def redact_sensitive(value: str) -> str:
+    redacted = str(value)
+    for pattern in TOKEN_PATTERNS:
+        redacted = pattern.sub(lambda match: f"{match.group(1) if match.lastindex else ''}[REDACTED]", redacted)
+    return redacted
+
+
+def is_sensitive_path(value: str) -> bool:
+    lower = value.lower()
+    return any(marker in lower for marker in SENSITIVE_PATH_MARKERS)
 
 
 def compress_output(value: str, max_chars: int = 1800, max_lines: int = 40) -> str:
@@ -94,6 +129,7 @@ def format_bytes(size: int) -> str:
 
 
 def command_output_block(value: str, policy: str = "auto") -> str:
+    value = redact_sensitive(value)
     line_count, byte_count = output_stats(value)
     if policy == "suppress" and line_count:
         return (
@@ -145,7 +181,8 @@ def describe_shell_command(command: str) -> tuple[str, str, str]:
     sed_match = re.search(r"sed\s+-n\s+['\"]?([0-9]+),([0-9]+)p['\"]?\s+(.+)$", inner)
     if sed_match:
         start, end, path = sed_match.groups()
-        return f"liest {compact_path(path)} (Zeilen {start}-{end})", "Datei gelesen", "suppress"
+        visible_path = "[REDACTED]" if is_sensitive_path(path) else compact_path(path)
+        return f"liest {visible_path} (Zeilen {start}-{end})", "Datei gelesen", "suppress"
 
     if executable in {"rg", "ripgrep"}:
         query = next((part for part in parts[1:] if not part.startswith("-")), "")
@@ -157,7 +194,8 @@ def describe_shell_command(command: str) -> tuple[str, str, str]:
         return "sucht im Arbeitsbereich", "Suche abgeschlossen", "auto"
 
     if executable in {"cat", "type"} and len(parts) >= 2:
-        return f"liest {compact_path(parts[-1])}", "Datei gelesen", "suppress"
+        visible_path = "[REDACTED]" if is_sensitive_path(parts[-1]) else compact_path(parts[-1])
+        return f"liest {visible_path}", "Datei gelesen", "suppress"
     if executable in {"ls", "dir"}:
         target = compact_path(parts[-1]) if len(parts) >= 2 and not parts[-1].startswith("-") else "das aktuelle Verzeichnis"
         return f"listet {target}", "Verzeichnis gelesen", "auto"
@@ -199,66 +237,126 @@ def public_codex_log_line(stream_name: str, line: str) -> str | None:
     return None
 
 
-def codex_json_event_message(event: dict[str, Any]) -> str | None:
+def parse_codex_json_line(line: str) -> dict[str, Any] | None:
+    try:
+        value = json.loads(line)
+    except json.JSONDecodeError:
+        return None
+    return value if isinstance(value, dict) else None
+
+
+def visible_item_name(item: dict[str, Any], fallback: str = "Tool") -> str:
+    return sanitize_log_line(str(item.get("name") or item.get("tool_name") or item.get("server") or fallback), 160)
+
+
+def item_path(item: dict[str, Any]) -> str:
+    raw_path = str(item.get("path") or item.get("file") or item.get("file_path") or item.get("uri") or "")
+    if not raw_path:
+        return "unbekannter Pfad"
+    return "[REDACTED]" if is_sensitive_path(raw_path) else compact_path(raw_path)
+
+
+def item_text(item: dict[str, Any]) -> str:
+    raw = item.get("text")
+    if raw is None:
+        raw = item.get("message") or item.get("content") or item.get("summary") or ""
+    return sanitize_log_line(str(raw), 2400)
+
+
+def map_codex_json_event(event: dict[str, Any]) -> list[VisibleDelta]:
     event_type = str(event.get("type") or "")
     if event_type == "thread.started":
         thread_id = str(event.get("thread_id") or "")
         short_id = thread_id[-12:] if len(thread_id) > 12 else thread_id
-        return f"Codex-Session {short_id} gestartet." if short_id else "Codex-Session gestartet."
+        text = f"Session {short_id} gestartet." if short_id else "Session gestartet."
+        return [VisibleDelta("status", text)]
     if event_type == "turn.started":
-        return "Aufgabe angenommen; Codex analysiert den nächsten sinnvollen Schritt."
+        return [VisibleDelta("status", "Bearbeitung begonnen.")]
     if event_type == "turn.completed":
         usage = event.get("usage") if isinstance(event.get("usage"), dict) else {}
         input_tokens = usage.get("input_tokens")
         output_tokens = usage.get("output_tokens")
         reasoning_tokens = usage.get("reasoning_output_tokens")
         if input_tokens is not None and output_tokens is not None:
-            return (
-                "Bearbeitung abgeschlossen; "
-                f"Tokens: input {input_tokens}, output {output_tokens}, reasoning {reasoning_tokens or 0}."
-            )
-        return "Bearbeitung abgeschlossen."
+            return [
+                VisibleDelta(
+                    "status",
+                    f"Bearbeitung abgeschlossen. Tokens: input {input_tokens}, output {output_tokens}, reasoning {reasoning_tokens or 0}.",
+                )
+            ]
+        return [VisibleDelta("status", "Bearbeitung abgeschlossen.")]
     if event_type in {"turn.failed", "error"}:
         message = event.get("message") or event.get("error") or "unbekannter Fehler"
-        return f"meldet einen Fehler: {sanitize_log_line(str(message), 300)}"
+        return [VisibleDelta("error", f"Fehler: {sanitize_log_line(str(message), 300)}")]
 
     item = event.get("item")
     if not isinstance(item, dict):
-        return None
+        if event_type:
+            log_event("codex.unknown_event", codex_event=event_type)
+        return []
 
     item_type = str(item.get("type") or "")
     status = str(item.get("status") or "")
     if item_type == "reasoning":
         if event_type == "item.started":
-            return "Denkt nach und plant den nächsten Schritt."
-        return "Planungsschritt abgeschlossen."
+            return [VisibleDelta("status", "Analysiert den nächsten Schritt.")]
+        if event_type in {"item.completed", "item.failed"}:
+            return [VisibleDelta("status", "Analyseabschnitt abgeschlossen.")]
+        return []
     if item_type == "command_execution":
         raw_command = str(item.get("command") or "Shell-Befehl")
         summary, done_summary, output_policy = describe_shell_command(raw_command)
         if event_type == "item.started":
-            return f"Startet: {summary}."
+            return [VisibleDelta("status", f"Shell: {summary}.")]
         exit_code = item.get("exit_code")
         output = command_output_block(str(item.get("aggregated_output") or ""), output_policy)
         if status == "failed" or (isinstance(exit_code, int) and exit_code != 0):
-            return f"{done_summary} mit Fehler (Exit {exit_code}).{output}"
-        return f"{done_summary} (Exit {exit_code}).{output}"
-
-    if item_type in {"tool_call", "function_call"}:
-        name = sanitize_log_line(str(item.get("name") or item.get("tool_name") or "Tool"), 160)
-        if event_type == "item.started":
-            return f"nutzt Tool {name}."
-        if status:
-            return f"Tool {name} ist {status}."
-        return f"Tool {name} abgeschlossen."
+            return [VisibleDelta("status", f"Shell fehlgeschlagen: {done_summary}, Exit {exit_code}.{output}")]
+        return [VisibleDelta("status", f"Shell abgeschlossen: {done_summary}, Exit {exit_code}.{output}")]
 
     if item_type == "agent_message":
-        return None
+        text = item_text(item)
+        return [VisibleDelta("agent", text, update_activity=False)] if text else []
+
+    if item_type in {"tool_call", "function_call", "mcp_tool_call"} or "tool" in item_type:
+        name = visible_item_name(item)
+        if event_type == "item.started":
+            return [VisibleDelta("status", f"Tool gestartet: {name}.")]
+        if status:
+            return [VisibleDelta("status", f"Tool {name}: {status}.")]
+        return [VisibleDelta("status", f"Tool abgeschlossen: {name}.")]
+
+    if item_type in {"file_change", "file_changes", "file_edit"} or "file" in item_type:
+        path = item_path(item)
+        if event_type == "item.started":
+            return [VisibleDelta("status", f"Dateiänderung gestartet: {path}.")]
+        if event_type == "item.failed":
+            return [VisibleDelta("error", f"Dateiänderung fehlgeschlagen: {path}.")]
+        return [VisibleDelta("status", f"Dateiänderung erkannt: {path}.")]
+
+    if item_type in {"web_search", "web_search_call"} or "search" in item_type:
+        query = sanitize_log_line(str(item.get("query") or item.get("name") or "Websuche"), 180)
+        if event_type == "item.started":
+            return [VisibleDelta("status", f"Websuche gestartet: {query}.")]
+        return [VisibleDelta("status", f"Websuche abgeschlossen: {query}.")]
+
+    if item_type in {"plan_update", "update_plan"} or "plan" in item_type:
+        text = item_text(item)
+        return [VisibleDelta("status", f"Plan aktualisiert: {text}.")] if text else [VisibleDelta("status", "Plan aktualisiert.")]
 
     if event_type == "item.started":
-        return f"startet Schritt {item_type or 'unbekannt'}."
+        return [VisibleDelta("status", f"Schritt gestartet: {item_type or 'unbekannt'}.")]
+    if event_type == "item.failed" and item_type:
+        return [VisibleDelta("error", f"Schritt fehlgeschlagen: {item_type}.")]
     if event_type == "item.completed" and item_type:
-        return f"Schritt {item_type} abgeschlossen."
-    return None
+        return [VisibleDelta("status", f"Schritt abgeschlossen: {item_type}.")]
+    log_event("codex.unknown_item", codex_event=event_type, item_type=item_type)
+    return []
+
+
+def codex_json_event_message(event: dict[str, Any]) -> str | None:
+    deltas = map_codex_json_event(event)
+    return deltas[0].text if deltas else None
 
 
 def parse_model_list(value: str | None) -> list[str] | None:
@@ -428,9 +526,10 @@ def run_codex(
     bypass_sandbox: bool,
     request_id: str,
     progress_callback: Callable[[str], None] | None = None,
+    event_callback: Callable[[VisibleDelta], None] | None = None,
     progress_interval: int = 15,
     disconnect_checker: Callable[[], bool] | None = None,
-) -> str:
+) -> CodexRunResult:
     target_model = MODEL_ALIASES.get(model, model)
     temp_dir: Path | None = None
     output_arg = None
@@ -473,8 +572,13 @@ def run_codex(
             sandbox_mode="bypass" if bypass_sandbox else sandbox_mode,
             prompt_chars=len(prompt),
         )
-        if progress_callback:
-            progress_callback(f"Modell {target_model} gestartet; warte auf erste Codex-Aktivität.")
+        def emit(delta: VisibleDelta) -> None:
+            if event_callback:
+                event_callback(delta)
+            elif progress_callback:
+                progress_callback(delta.text)
+
+        emit(VisibleDelta("status", f"Modell {target_model} gestartet; warte auf erste Codex-Aktivität."))
 
         process = subprocess.Popen(
             command,
@@ -516,6 +620,9 @@ def run_codex(
         next_progress = started_at + max(1, progress_interval)
         active_readers = len(readers)
         current_activity = "Codex initialisiert die Ausführung"
+        agent_messages: list[str] = []
+        last_visible_text = ""
+        last_visible_at = started_at
 
         while active_readers:
             now = time.monotonic()
@@ -531,10 +638,14 @@ def run_codex(
                 log_event("codex.timeout", request_id=request_id, elapsed_seconds=elapsed)
                 raise TimeoutError(f"codex exec timed out after {timeout} seconds")
 
-            if progress_callback and now >= next_progress:
+            if (event_callback or progress_callback) and now >= next_progress:
                 elapsed = int(now - started_at)
+                if now - last_visible_at < max(1, progress_interval):
+                    next_progress = last_visible_at + max(1, progress_interval)
+                    continue
                 try:
-                    progress_callback(f"arbeitet seit {elapsed}s weiter: {current_activity}.")
+                    emit(VisibleDelta("heartbeat", f"wartet weiterhin auf das nächste Codex-Ereignis: {current_activity}.", False))
+                    last_visible_at = now
                 except (BrokenPipeError, ConnectionResetError, OSError):
                     if process.poll() is None:
                         stop_process(process, request_id, "client_disconnected")
@@ -560,13 +671,13 @@ def run_codex(
                 stderr_tail = (stderr_tail + [sanitize_log_line(line)])[-20:]
 
             if stream_name == "stdout":
-                try:
-                    codex_event = json.loads(line)
-                except json.JSONDecodeError:
-                    codex_event = None
+                codex_event = parse_codex_json_line(line)
+                if codex_event is None:
+                    log_event("codex.json_warning", request_id=request_id, chars=len(line))
                 if isinstance(codex_event, dict):
                     event_type = str(codex_event.get("type") or "")
-                    message = codex_json_event_message(codex_event)
+                    deltas = map_codex_json_event(codex_event)
+                    message = "\n".join(delta.text for delta in deltas if delta.text)
                     message_preview = message.split("\n", 1)[0] if message else None
                     log_event(
                         "codex.event",
@@ -575,10 +686,20 @@ def run_codex(
                         message=sanitize_log_line(message_preview or "", 500) if message_preview else None,
                         visible_chars=len(message) if message else None,
                     )
-                    if message and progress_callback:
-                        current_activity = next_heartbeat_activity(message)
+                    for delta in deltas:
+                        if not delta.text:
+                            continue
+                        formatted = format_visible_delta(delta)
+                        if formatted == last_visible_text:
+                            continue
+                        if delta.update_activity:
+                            current_activity = next_heartbeat_activity(delta.text)
+                        if delta.kind == "agent":
+                            agent_messages.append(delta.text.strip())
                         try:
-                            progress_callback(message)
+                            emit(delta)
+                            last_visible_text = formatted
+                            last_visible_at = time.monotonic()
                         except (BrokenPipeError, ConnectionResetError, OSError):
                             if process.poll() is None:
                                 stop_process(process, request_id, "client_disconnected")
@@ -612,9 +733,7 @@ def run_codex(
             elapsed_seconds=elapsed,
             output_chars=len(text),
         )
-        if progress_callback:
-            progress_callback(f"abgeschlossen nach {elapsed}s; übertrage Antwort.")
-        return text
+        return CodexRunResult(text=text, agent_messages=agent_messages)
     finally:
         if process is not None and process.poll() is None:
             stop_process(process, request_id, "cleanup")
@@ -623,6 +742,17 @@ def run_codex(
 
 def chunk_text(value: str, size: int = 1200) -> list[str]:
     return [value[index : index + size] for index in range(0, len(value), size)] or [""]
+
+
+def normalize_for_duplicate_check(value: str) -> str:
+    return re.sub(r"\s+", " ", redact_sensitive(value)).strip()
+
+
+def final_text_was_streamed(text: str, agent_messages: list[str]) -> bool:
+    normalized = normalize_for_duplicate_check(text)
+    if not normalized:
+        return True
+    return any(normalize_for_duplicate_check(message) == normalized for message in agent_messages)
 
 
 def chat_completion_response(completion_id: str, model: str, text: str, created: int) -> dict[str, Any]:
@@ -666,8 +796,18 @@ def responses_result(response_id: str, message_id: str, model: str, text: str, c
     }
 
 
+def format_visible_delta(delta: VisibleDelta) -> str:
+    text = redact_sensitive(delta.text).strip()
+    if not text:
+        return ""
+    if delta.kind == "agent":
+        return f"{text}\n\n"
+    prefix = "Codex Fehler" if delta.kind == "error" else "Codex"
+    return f"{prefix}: {text}\n\n"
+
+
 def progress_delta(message: str) -> str:
-    return f"Codex: {message}\n\n"
+    return format_visible_delta(VisibleDelta("status", message))
 
 
 def next_heartbeat_activity(message: str) -> str:
@@ -784,6 +924,7 @@ class CodexBridgeHandler(BaseHTTPRequestHandler):
             self.send_response(200)
             self.send_header("Content-Type", "text/event-stream; charset=utf-8")
             self.send_header("Cache-Control", "no-cache")
+            self.send_header("Connection", "keep-alive")
             self.send_header("X-Accel-Buffering", "no")
             self.end_headers()
             self._sse_event(
@@ -797,8 +938,10 @@ class CodexBridgeHandler(BaseHTTPRequestHandler):
             )
             progress_text: list[str] = []
 
-            def send_progress(message: str) -> None:
-                delta = progress_delta(message)
+            def send_visible(delta_item: VisibleDelta) -> None:
+                delta = format_visible_delta(delta_item)
+                if not delta:
+                    return
                 progress_text.append(delta)
                 self._sse_event(
                     {
@@ -811,7 +954,7 @@ class CodexBridgeHandler(BaseHTTPRequestHandler):
                 )
 
             try:
-                text = run_codex(
+                result = run_codex(
                     prompt,
                     model=model,
                     timeout=self.server.codex_timeout,
@@ -821,14 +964,14 @@ class CodexBridgeHandler(BaseHTTPRequestHandler):
                     sandbox_mode=self.server.sandbox_mode,
                     bypass_sandbox=self.server.bypass_sandbox,
                     request_id=request_id,
-                    progress_callback=send_progress,
+                    event_callback=send_visible,
                     progress_interval=self.server.progress_interval,
                     disconnect_checker=self._client_connected,
                 )
             except ClientDisconnected:
                 raise
             except Exception as exc:
-                error_text = f"[Codex] Fehler: {exc}\n"
+                error_text = format_visible_delta(VisibleDelta("error", f"Codex wurde abgebrochen oder meldete einen Fehler. Details: {sanitize_log_line(str(exc), 600)}"))
                 self._sse_event(
                     {
                         "id": completion_id,
@@ -850,16 +993,17 @@ class CodexBridgeHandler(BaseHTTPRequestHandler):
                 self._write_done()
                 return
 
-            for chunk in chunk_text(text):
-                self._sse_event(
-                    {
-                        "id": completion_id,
-                        "object": "chat.completion.chunk",
-                        "created": created,
-                        "model": model,
-                        "choices": [{"index": 0, "delta": {"content": chunk}, "finish_reason": None}],
-                    }
-                )
+            if not final_text_was_streamed(result.text, result.agent_messages):
+                for chunk in chunk_text(result.text):
+                    self._sse_event(
+                        {
+                            "id": completion_id,
+                            "object": "chat.completion.chunk",
+                            "created": created,
+                            "model": model,
+                            "choices": [{"index": 0, "delta": {"content": chunk}, "finish_reason": None}],
+                        }
+                    )
             self._sse_event(
                 {
                     "id": completion_id,
@@ -871,7 +1015,7 @@ class CodexBridgeHandler(BaseHTTPRequestHandler):
             )
             self._write_done()
             return
-        text = run_codex(
+        result = run_codex(
             prompt,
             model=model,
             timeout=self.server.codex_timeout,
@@ -883,7 +1027,7 @@ class CodexBridgeHandler(BaseHTTPRequestHandler):
             request_id=request_id,
             progress_interval=self.server.progress_interval,
         )
-        self._json_response(200, chat_completion_response(completion_id, model, text, created))
+        self._json_response(200, chat_completion_response(completion_id, model, result.text, created))
 
     def _responses(self, payload: dict[str, Any]) -> None:
         model = str(payload.get("model") or "coder")
@@ -898,6 +1042,7 @@ class CodexBridgeHandler(BaseHTTPRequestHandler):
             self.send_response(200)
             self.send_header("Content-Type", "text/event-stream; charset=utf-8")
             self.send_header("Cache-Control", "no-cache")
+            self.send_header("Connection", "keep-alive")
             self.send_header("X-Accel-Buffering", "no")
             self.end_headers()
             base_response = {
@@ -933,8 +1078,10 @@ class CodexBridgeHandler(BaseHTTPRequestHandler):
             )
             progress_text: list[str] = []
 
-            def send_progress(message: str) -> None:
-                delta = progress_delta(message)
+            def send_visible(delta_item: VisibleDelta) -> None:
+                delta = format_visible_delta(delta_item)
+                if not delta:
+                    return
                 progress_text.append(delta)
                 self._sse_event(
                     {
@@ -946,7 +1093,7 @@ class CodexBridgeHandler(BaseHTTPRequestHandler):
                 )
 
             try:
-                text = run_codex(
+                result = run_codex(
                     prompt,
                     model=model,
                     timeout=self.server.codex_timeout,
@@ -956,16 +1103,17 @@ class CodexBridgeHandler(BaseHTTPRequestHandler):
                     sandbox_mode=self.server.sandbox_mode,
                     bypass_sandbox=self.server.bypass_sandbox,
                     request_id=request_id,
-                    progress_callback=send_progress,
+                    event_callback=send_visible,
                     progress_interval=self.server.progress_interval,
                     disconnect_checker=self._client_connected,
                 )
             except ClientDisconnected:
                 raise
             except Exception as exc:
-                error_text = f"[Codex] Fehler: {exc}\n"
+                error_text = format_visible_delta(VisibleDelta("error", f"Codex wurde abgebrochen oder meldete einen Fehler. Details: {sanitize_log_line(str(exc), 600)}"))
                 final_part = {"type": "output_text", "text": error_text, "annotations": []}
                 final_item = responses_message_item(message_id, error_text)
+                self._sse_event({"type": "error", "error": {"message": error_text.strip(), "type": "codex_bridge_error"}})
                 self._sse_event(
                     {
                         "type": "response.output_text.delta",
@@ -1003,16 +1151,18 @@ class CodexBridgeHandler(BaseHTTPRequestHandler):
                 self._write_done()
                 return
 
-            for chunk in chunk_text(text):
-                self._sse_event(
-                    {
-                        "type": "response.output_text.delta",
-                        "output_index": 0,
-                        "content_index": 0,
-                        "delta": chunk,
-                    }
-                )
-            visible_text = "".join(progress_text) + text
+            final_already_streamed = final_text_was_streamed(result.text, result.agent_messages)
+            if not final_already_streamed:
+                for chunk in chunk_text(result.text):
+                    self._sse_event(
+                        {
+                            "type": "response.output_text.delta",
+                            "output_index": 0,
+                            "content_index": 0,
+                            "delta": chunk,
+                        }
+                    )
+            visible_text = "".join(progress_text) + ("" if final_already_streamed else result.text)
             final_part = {"type": "output_text", "text": visible_text, "annotations": []}
             final_item = responses_message_item(message_id, visible_text)
             self._sse_event(
@@ -1040,7 +1190,7 @@ class CodexBridgeHandler(BaseHTTPRequestHandler):
             )
             self._write_done()
             return
-        text = run_codex(
+        result = run_codex(
             prompt,
             model=model,
             timeout=self.server.codex_timeout,
@@ -1052,7 +1202,7 @@ class CodexBridgeHandler(BaseHTTPRequestHandler):
             request_id=request_id,
             progress_interval=self.server.progress_interval,
         )
-        self._json_response(200, responses_result(response_id, message_id, model, text, created))
+        self._json_response(200, responses_result(response_id, message_id, model, result.text, created))
 
     def do_POST(self) -> None:  # noqa: N802
         path = self.path.rstrip("/")

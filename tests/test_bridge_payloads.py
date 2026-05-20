@@ -1,17 +1,27 @@
 import unittest
 
+import io
+import json
 import tempfile
+from types import SimpleNamespace
 from pathlib import Path
 
 from src.codex_openai_bridge import (
+    CodexBridgeHandler,
+    VisibleDelta,
     build_prompt_from_responses,
     codex_json_event_message,
     compress_output,
     describe_shell_command,
+    final_text_was_streamed,
+    format_visible_delta,
+    map_codex_json_event,
     next_heartbeat_activity,
+    parse_codex_json_line,
     parse_model_list,
     progress_delta,
     public_codex_log_line,
+    redact_sensitive,
     read_secret_value,
     responses_result,
 )
@@ -57,7 +67,7 @@ class BridgePayloadTests(unittest.TestCase):
     def test_codex_json_event_message(self):
         self.assertEqual(
             codex_json_event_message({"type": "turn.started"}),
-            "Aufgabe angenommen; Codex analysiert den nächsten sinnvollen Schritt.",
+            "Bearbeitung begonnen.",
         )
         self.assertEqual(
             codex_json_event_message(
@@ -66,7 +76,7 @@ class BridgePayloadTests(unittest.TestCase):
                     "item": {"type": "command_execution", "command": "/bin/bash -lc ls"},
                 }
             ),
-            "Startet: listet das aktuelle Verzeichnis.",
+            "Shell: listet das aktuelle Verzeichnis.",
         )
         self.assertIn(
             "Ausgabe:",
@@ -83,8 +93,9 @@ class BridgePayloadTests(unittest.TestCase):
                 }
             ),
         )
-        self.assertIsNone(
-            codex_json_event_message({"type": "item.completed", "item": {"type": "agent_message", "text": "OK"}})
+        self.assertEqual(
+            codex_json_event_message({"type": "item.completed", "item": {"type": "agent_message", "text": "OK"}}),
+            "OK",
         )
 
     def test_compress_output_omits_middle(self):
@@ -108,9 +119,47 @@ class BridgePayloadTests(unittest.TestCase):
 
     def test_completed_steps_do_not_repeat_as_heartbeat_activity(self):
         self.assertEqual(
-            next_heartbeat_activity("Datei gelesen (Exit 0).\nErgebnis: 10 Zeilen gelesen."),
+            next_heartbeat_activity("Shell abgeschlossen: Datei gelesen, Exit 0.\nErgebnis: 10 Zeilen gelesen."),
             "wertet die letzte Ausgabe aus und plant den nächsten Schritt",
         )
+
+    def test_reasoning_does_not_expose_private_content(self):
+        deltas = map_codex_json_event(
+            {"type": "item.completed", "item": {"type": "reasoning", "text": "private chain of thought"}}
+        )
+        self.assertEqual(deltas[0].text, "Analyseabschnitt abgeschlossen.")
+        self.assertNotIn("private", deltas[0].text)
+
+    def test_agent_message_formats_as_assistant_text(self):
+        delta = map_codex_json_event({"type": "item.completed", "item": {"type": "agent_message", "text": "Ich prüfe."}})[0]
+        self.assertEqual(delta.kind, "agent")
+        self.assertEqual(format_visible_delta(delta), "Ich prüfe.\n\n")
+
+    def test_redacts_secret_like_values(self):
+        redacted = redact_sensitive("Authorization: Bearer sk-testSecretToken123456789 OPENAI_API_KEY=abc123")
+        self.assertIn("[REDACTED]", redacted)
+        self.assertNotIn("sk-testSecretToken", redacted)
+        self.assertNotIn("abc123", redacted)
+
+    def test_bad_json_line_is_ignored(self):
+        self.assertIsNone(parse_codex_json_line("{not-json"))
+        self.assertEqual(parse_codex_json_line('{"type":"turn.started"}')["type"], "turn.started")
+
+    def test_final_answer_duplicate_detection(self):
+        self.assertTrue(final_text_was_streamed("Fertig.", ["Fertig."]))
+        self.assertFalse(final_text_was_streamed("Fertig.", ["Zwischenstand."]))
+
+    def test_sse_event_is_valid_json_and_terminated(self):
+        fake = SimpleNamespace(wfile=io.BytesIO())
+        CodexBridgeHandler._sse_event(fake, {"type": "response.output_text.delta", "delta": "Hallo"})
+        raw = fake.wfile.getvalue().decode("utf-8")
+        self.assertTrue(raw.endswith("\n\n"))
+        self.assertIn("event: response.output_text.delta\n", raw)
+        payload = json.loads(raw.split("data: ", 1)[1])
+        self.assertEqual(payload["delta"], "Hallo")
+
+    def test_chat_completions_fallback_exists_but_responses_is_documented_default(self):
+        self.assertTrue(callable(CodexBridgeHandler._chat_completions))
 
 
 if __name__ == "__main__":
