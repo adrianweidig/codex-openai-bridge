@@ -8,6 +8,7 @@ from src.codex_openai_bridge import (
     codex_json_event_message,
     compress_output,
     describe_shell_command,
+    next_heartbeat_activity,
     parse_model_list,
     progress_delta,
     public_codex_log_line,
@@ -68,7 +69,7 @@ class BridgePayloadTests(unittest.TestCase):
             "Startet: listet das aktuelle Verzeichnis.",
         )
         self.assertIn(
-            "```text",
+            "Ausgabe:",
             codex_json_event_message(
                 {
                     "type": "item.completed",
@@ -94,15 +95,22 @@ class BridgePayloadTests(unittest.TestCase):
         self.assertIn("line-59", compressed)
 
     def test_describe_shell_command(self):
-        summary, done = describe_shell_command(
+        summary, done, policy = describe_shell_command(
             "/bin/bash -lc \"sed -n '1,220p' /home/codex/.codex/plugins/cache/skill/SKILL.md\""
         )
         self.assertIn("liest", summary)
         self.assertIn("Zeilen 1-220", summary)
         self.assertEqual(done, "Datei gelesen")
+        self.assertEqual(policy, "suppress")
 
     def test_progress_delta_is_markdown(self):
-        self.assertEqual(progress_delta("arbeitet."), "**Codex**: arbeitet.\n\n")
+        self.assertEqual(progress_delta("arbeitet."), "Codex: arbeitet.\n\n")
+
+    def test_completed_steps_do_not_repeat_as_heartbeat_activity(self):
+        self.assertEqual(
+            next_heartbeat_activity("Datei gelesen (Exit 0).\nErgebnis: 10 Zeilen gelesen."),
+            "wertet die letzte Ausgabe aus und plant den nächsten Schritt",
+        )
 
 
 if __name__ == "__main__":

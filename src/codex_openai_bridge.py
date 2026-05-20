@@ -78,11 +78,39 @@ def compress_output(value: str, max_chars: int = 1800, max_lines: int = 40) -> s
     return compact[:head_count].rstrip() + f"\n... {omitted_chars} Zeichen ausgelassen ...\n" + compact[-tail_count:].lstrip()
 
 
-def command_output_block(value: str) -> str:
+def output_stats(value: str) -> tuple[int, int]:
+    clean = value.replace("\r", "").strip()
+    if not clean:
+        return 0, 0
+    return len(clean.splitlines()), len(clean.encode("utf-8"))
+
+
+def format_bytes(size: int) -> str:
+    if size < 1024:
+        return f"{size} B"
+    if size < 1024 * 1024:
+        return f"{size / 1024:.1f} KB"
+    return f"{size / (1024 * 1024):.1f} MB"
+
+
+def command_output_block(value: str, policy: str = "auto") -> str:
+    line_count, byte_count = output_stats(value)
+    if policy == "suppress" and line_count:
+        return (
+            f"\nErgebnis: {line_count} Zeilen gelesen ({format_bytes(byte_count)}); "
+            "Inhalt im Chat ausgeblendet, damit der Live-Status lesbar bleibt."
+        )
     compact = compress_output(value)
     if not compact:
         return ""
-    return f"\n\nAusgabe:\n```text\n{compact}\n```"
+    compact_lines = compact.splitlines()
+    if len(compact_lines) <= 3 and len(compact) <= 260:
+        return "\nAusgabe: " + " | ".join(line.strip() for line in compact_lines if line.strip())
+    label = "Ausgabe"
+    if line_count > len(compact_lines) or byte_count > len(compact.encode("utf-8")):
+        label = f"Ausgabe gekürzt ({len(compact_lines)} von {line_count} Zeilen)"
+    indented = "\n".join(f"  {line}" for line in compact_lines)
+    return f"\n{label}:\n{indented}"
 
 
 def strip_shell_wrapper(command: str) -> str:
@@ -106,7 +134,7 @@ def compact_path(value: str, max_length: int = 90) -> str:
     return "..." + path[-max_length + 3 :]
 
 
-def describe_shell_command(command: str) -> tuple[str, str]:
+def describe_shell_command(command: str) -> tuple[str, str, str]:
     inner = strip_shell_wrapper(command)
     try:
         parts = shlex.split(inner)
@@ -117,34 +145,34 @@ def describe_shell_command(command: str) -> tuple[str, str]:
     sed_match = re.search(r"sed\s+-n\s+['\"]?([0-9]+),([0-9]+)p['\"]?\s+(.+)$", inner)
     if sed_match:
         start, end, path = sed_match.groups()
-        return f"liest {compact_path(path)} (Zeilen {start}-{end})", "Datei gelesen"
+        return f"liest {compact_path(path)} (Zeilen {start}-{end})", "Datei gelesen", "suppress"
 
     if executable in {"rg", "ripgrep"}:
         query = next((part for part in parts[1:] if not part.startswith("-")), "")
         target = parts[-1] if len(parts) > 2 else ""
         if query and target and target != query:
-            return f"sucht nach `{sanitize_log_line(query, 80)}` in {compact_path(target)}", "Suche abgeschlossen"
+            return f"sucht nach \"{sanitize_log_line(query, 80)}\" in {compact_path(target)}", "Suche abgeschlossen", "auto"
         if query:
-            return f"sucht nach `{sanitize_log_line(query, 80)}`", "Suche abgeschlossen"
-        return "sucht im Arbeitsbereich", "Suche abgeschlossen"
+            return f"sucht nach \"{sanitize_log_line(query, 80)}\"", "Suche abgeschlossen", "auto"
+        return "sucht im Arbeitsbereich", "Suche abgeschlossen", "auto"
 
     if executable in {"cat", "type"} and len(parts) >= 2:
-        return f"liest {compact_path(parts[-1])}", "Datei gelesen"
+        return f"liest {compact_path(parts[-1])}", "Datei gelesen", "suppress"
     if executable in {"ls", "dir"}:
         target = compact_path(parts[-1]) if len(parts) >= 2 and not parts[-1].startswith("-") else "das aktuelle Verzeichnis"
-        return f"listet {target}", "Verzeichnis gelesen"
+        return f"listet {target}", "Verzeichnis gelesen", "auto"
     if executable in {"python", "python3"}:
-        return "führt Python aus", "Python-Lauf abgeschlossen"
+        return "führt Python aus", "Python-Lauf abgeschlossen", "auto"
     if executable in {"node", "npm", "npx", "pnpm", "yarn"}:
-        return f"führt {executable} aus", f"{executable}-Lauf abgeschlossen"
+        return f"führt {executable} aus", f"{executable}-Lauf abgeschlossen", "auto"
     if executable == "git":
         action = parts[1] if len(parts) > 1 else "Befehl"
-        return f"prüft Git: `{sanitize_log_line(action, 60)}`", "Git-Schritt abgeschlossen"
+        return f"prüft Git: {sanitize_log_line(action, 60)}", "Git-Schritt abgeschlossen", "auto"
     if executable == "docker":
         action = parts[1] if len(parts) > 1 else "Befehl"
-        return f"nutzt Docker: `{sanitize_log_line(action, 60)}`", "Docker-Schritt abgeschlossen"
+        return f"nutzt Docker: {sanitize_log_line(action, 60)}", "Docker-Schritt abgeschlossen", "auto"
 
-    return f"führt Shell-Schritt aus: `{sanitize_log_line(inner, 180)}`", "Shell-Schritt abgeschlossen"
+    return f"führt Shell-Schritt aus: {sanitize_log_line(inner, 180)}", "Shell-Schritt abgeschlossen", "auto"
 
 
 def public_codex_log_line(stream_name: str, line: str) -> str | None:
@@ -176,7 +204,7 @@ def codex_json_event_message(event: dict[str, Any]) -> str | None:
     if event_type == "thread.started":
         thread_id = str(event.get("thread_id") or "")
         short_id = thread_id[-12:] if len(thread_id) > 12 else thread_id
-        return f"Codex-Session `{short_id}` gestartet." if short_id else "Codex-Session gestartet."
+        return f"Codex-Session {short_id} gestartet." if short_id else "Codex-Session gestartet."
     if event_type == "turn.started":
         return "Aufgabe angenommen; Codex analysiert den nächsten sinnvollen Schritt."
     if event_type == "turn.completed":
@@ -206,11 +234,11 @@ def codex_json_event_message(event: dict[str, Any]) -> str | None:
         return "Planungsschritt abgeschlossen."
     if item_type == "command_execution":
         raw_command = str(item.get("command") or "Shell-Befehl")
-        summary, done_summary = describe_shell_command(raw_command)
+        summary, done_summary, output_policy = describe_shell_command(raw_command)
         if event_type == "item.started":
             return f"Startet: {summary}."
         exit_code = item.get("exit_code")
-        output = command_output_block(str(item.get("aggregated_output") or ""))
+        output = command_output_block(str(item.get("aggregated_output") or ""), output_policy)
         if status == "failed" or (isinstance(exit_code, int) and exit_code != 0):
             return f"{done_summary} mit Fehler (Exit {exit_code}).{output}"
         return f"{done_summary} (Exit {exit_code}).{output}"
@@ -218,18 +246,18 @@ def codex_json_event_message(event: dict[str, Any]) -> str | None:
     if item_type in {"tool_call", "function_call"}:
         name = sanitize_log_line(str(item.get("name") or item.get("tool_name") or "Tool"), 160)
         if event_type == "item.started":
-            return f"nutzt Tool `{name}`."
+            return f"nutzt Tool {name}."
         if status:
-            return f"Tool `{name}` ist {status}."
-        return f"Tool `{name}` abgeschlossen."
+            return f"Tool {name} ist {status}."
+        return f"Tool {name} abgeschlossen."
 
     if item_type == "agent_message":
         return None
 
     if event_type == "item.started":
-        return f"startet Schritt `{item_type or 'unbekannt'}`."
+        return f"startet Schritt {item_type or 'unbekannt'}."
     if event_type == "item.completed" and item_type:
-        return f"Schritt `{item_type}` abgeschlossen."
+        return f"Schritt {item_type} abgeschlossen."
     return None
 
 
@@ -446,7 +474,7 @@ def run_codex(
             prompt_chars=len(prompt),
         )
         if progress_callback:
-            progress_callback(f"Modell `{target_model}` gestartet; warte auf erste Codex-Aktivität.")
+            progress_callback(f"Modell {target_model} gestartet; warte auf erste Codex-Aktivität.")
 
         process = subprocess.Popen(
             command,
@@ -548,7 +576,7 @@ def run_codex(
                         visible_chars=len(message) if message else None,
                     )
                     if message and progress_callback:
-                        current_activity = message.split("\n", 1)[0].rstrip(".")
+                        current_activity = next_heartbeat_activity(message)
                         try:
                             progress_callback(message)
                         except (BrokenPipeError, ConnectionResetError, OSError):
@@ -639,7 +667,25 @@ def responses_result(response_id: str, message_id: str, model: str, text: str, c
 
 
 def progress_delta(message: str) -> str:
-    return f"**Codex**: {message}\n\n"
+    return f"Codex: {message}\n\n"
+
+
+def next_heartbeat_activity(message: str) -> str:
+    first_line = message.split("\n", 1)[0].rstrip(".")
+    if any(
+        marker in first_line
+        for marker in (
+            "abgeschlossen",
+            "gelesen",
+            "gelistet",
+            "Bearbeitung abgeschlossen",
+            "Planungsschritt abgeschlossen",
+        )
+    ):
+        return "wertet die letzte Ausgabe aus und plant den nächsten Schritt"
+    if first_line.startswith("Startet: "):
+        return first_line.removeprefix("Startet: ")
+    return first_line
 
 
 class CodexBridgeHandler(BaseHTTPRequestHandler):
