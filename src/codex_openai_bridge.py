@@ -815,6 +815,32 @@ def chat_completion_response(completion_id: str, model: str, text: str, created:
     }
 
 
+def chat_completion_chunk(
+    completion_id: str,
+    model: str,
+    created: int,
+    content: str | None = None,
+    role: str | None = None,
+    finish_reason: str | None = None,
+    usage: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    delta: dict[str, Any] = {}
+    if role:
+        delta["role"] = role
+    if content is not None:
+        delta["content"] = content
+    chunk: dict[str, Any] = {
+        "id": completion_id,
+        "object": "chat.completion.chunk",
+        "created": created,
+        "model": model,
+        "choices": [{"index": 0, "delta": delta, "finish_reason": finish_reason}],
+    }
+    if usage is not None:
+        chunk["usage"] = usage
+    return chunk
+
+
 def responses_message_item(message_id: str, text: str, status: str = "completed") -> dict[str, Any]:
     return {
         "id": message_id,
@@ -948,6 +974,7 @@ class CodexBridgeHandler(BaseHTTPRequestHandler):
         try:
             self.wfile.write(b"data: [DONE]\n\n")
             self.wfile.flush()
+            self.close_connection = True
         except (BrokenPipeError, ConnectionResetError, OSError) as exc:
             raise ClientDisconnected() from exc
 
@@ -977,15 +1004,7 @@ class CodexBridgeHandler(BaseHTTPRequestHandler):
             self.send_header("Connection", "keep-alive")
             self.send_header("X-Accel-Buffering", "no")
             self.end_headers()
-            self._sse_event(
-                {
-                    "id": completion_id,
-                    "object": "chat.completion.chunk",
-                    "created": created,
-                    "model": model,
-                    "choices": [{"index": 0, "delta": {"role": "assistant"}, "finish_reason": None}],
-                }
-            )
+            self._sse_event(chat_completion_chunk(completion_id, model, created, role="assistant"))
             progress_text: list[str] = []
 
             def send_visible(delta_item: VisibleDelta) -> None:
@@ -993,15 +1012,7 @@ class CodexBridgeHandler(BaseHTTPRequestHandler):
                 if not delta:
                     return
                 progress_text.append(delta)
-                self._sse_event(
-                    {
-                        "id": completion_id,
-                        "object": "chat.completion.chunk",
-                        "created": created,
-                        "model": model,
-                        "choices": [{"index": 0, "delta": {"content": delta}, "finish_reason": None}],
-                    }
-                )
+                self._sse_event(chat_completion_chunk(completion_id, model, created, content=delta))
 
             try:
                 result = run_codex(
@@ -1022,47 +1033,15 @@ class CodexBridgeHandler(BaseHTTPRequestHandler):
                 raise
             except Exception as exc:
                 error_text = format_visible_delta(VisibleDelta("error", f"Codex wurde abgebrochen oder meldete einen Fehler. Details: {sanitize_log_line(str(exc), 600)}"))
-                self._sse_event(
-                    {
-                        "id": completion_id,
-                        "object": "chat.completion.chunk",
-                        "created": created,
-                        "model": model,
-                        "choices": [{"index": 0, "delta": {"content": error_text}, "finish_reason": None}],
-                    }
-                )
-                self._sse_event(
-                    {
-                        "id": completion_id,
-                        "object": "chat.completion.chunk",
-                        "created": created,
-                        "model": model,
-                        "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
-                    }
-                )
+                self._sse_event(chat_completion_chunk(completion_id, model, created, content=error_text))
+                self._sse_event(chat_completion_chunk(completion_id, model, created, finish_reason="stop"))
                 self._write_done()
                 return
 
             if not final_text_was_streamed(result.text, result.agent_messages):
                 for chunk in chunk_text(result.text):
-                    self._sse_event(
-                        {
-                            "id": completion_id,
-                            "object": "chat.completion.chunk",
-                            "created": created,
-                            "model": model,
-                            "choices": [{"index": 0, "delta": {"content": chunk}, "finish_reason": None}],
-                        }
-                    )
-            self._sse_event(
-                {
-                    "id": completion_id,
-                    "object": "chat.completion.chunk",
-                    "created": created,
-                    "model": model,
-                    "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
-                }
-            )
+                    self._sse_event(chat_completion_chunk(completion_id, model, created, content=chunk))
+            self._sse_event(chat_completion_chunk(completion_id, model, created, finish_reason="stop"))
             self._write_done()
             return
         result = run_codex(
@@ -1087,6 +1066,7 @@ class CodexBridgeHandler(BaseHTTPRequestHandler):
         created = int(time.time())
         response_id = f"resp_codex_{uuid.uuid4().hex}"
         message_id = f"msg_codex_{uuid.uuid4().hex}"
+        completion_id = f"chatcmpl-codex-{uuid.uuid4().hex}"
         request_id = response_id
         if payload.get("stream"):
             self.send_response(200)
@@ -1105,6 +1085,8 @@ class CodexBridgeHandler(BaseHTTPRequestHandler):
             }
             self._sse_event({"type": "response.created", "response": base_response})
             self._sse_event({"type": "response.in_progress", "response": base_response})
+            if self.server.openwebui_chat_compat_stream:
+                self._sse_event(chat_completion_chunk(completion_id, model, created, role="assistant"))
             self._sse_event(
                 {
                     "type": "response.output_item.added",
@@ -1134,15 +1116,18 @@ class CodexBridgeHandler(BaseHTTPRequestHandler):
                 if not delta:
                     return
                 progress_text.append(delta)
-                self._sse_event(
-                    {
-                        "type": "response.output_text.delta",
-                        "item_id": message_id,
-                        "output_index": 0,
-                        "content_index": 0,
-                        "delta": delta,
-                    }
-                )
+                if self.server.openwebui_chat_compat_stream:
+                    self._sse_event(chat_completion_chunk(completion_id, model, created, content=delta))
+                else:
+                    self._sse_event(
+                        {
+                            "type": "response.output_text.delta",
+                            "item_id": message_id,
+                            "output_index": 0,
+                            "content_index": 0,
+                            "delta": delta,
+                        }
+                    )
 
             try:
                 result = run_codex(
@@ -1166,15 +1151,18 @@ class CodexBridgeHandler(BaseHTTPRequestHandler):
                 final_part = {"type": "output_text", "text": error_text, "annotations": []}
                 final_item = responses_message_item(message_id, error_text)
                 self._sse_event({"type": "error", "error": {"message": error_text.strip(), "type": "codex_bridge_error"}})
-                self._sse_event(
-                    {
-                        "type": "response.output_text.delta",
-                        "item_id": message_id,
-                        "output_index": 0,
-                        "content_index": 0,
-                        "delta": error_text,
-                    }
-                )
+                if self.server.openwebui_chat_compat_stream:
+                    self._sse_event(chat_completion_chunk(completion_id, model, created, content=error_text))
+                else:
+                    self._sse_event(
+                        {
+                            "type": "response.output_text.delta",
+                            "item_id": message_id,
+                            "output_index": 0,
+                            "content_index": 0,
+                            "delta": error_text,
+                        }
+                    )
                 self._sse_event(
                     {
                         "type": "response.output_text.done",
@@ -1203,21 +1191,26 @@ class CodexBridgeHandler(BaseHTTPRequestHandler):
                         },
                     }
                 )
+                if self.server.openwebui_chat_compat_stream:
+                    self._sse_event(chat_completion_chunk(completion_id, model, created, finish_reason="stop"))
                 self._write_done()
                 return
 
             final_already_streamed = final_text_was_streamed(result.text, result.agent_messages)
             if not final_already_streamed:
                 for chunk in chunk_text(result.text):
-                    self._sse_event(
-                        {
-                            "type": "response.output_text.delta",
-                            "item_id": message_id,
-                            "output_index": 0,
-                            "content_index": 0,
-                            "delta": chunk,
-                        }
-                    )
+                    if self.server.openwebui_chat_compat_stream:
+                        self._sse_event(chat_completion_chunk(completion_id, model, created, content=chunk))
+                    else:
+                        self._sse_event(
+                            {
+                                "type": "response.output_text.delta",
+                                "item_id": message_id,
+                                "output_index": 0,
+                                "content_index": 0,
+                                "delta": chunk,
+                            }
+                        )
             visible_text = "".join(progress_text) + ("" if final_already_streamed else result.text)
             final_part = {"type": "output_text", "text": visible_text, "annotations": []}
             final_item = responses_message_item(message_id, visible_text)
@@ -1246,6 +1239,16 @@ class CodexBridgeHandler(BaseHTTPRequestHandler):
                     "response": responses_result(response_id, message_id, model, visible_text, created, result.usage),
                 }
             )
+            if self.server.openwebui_chat_compat_stream:
+                self._sse_event(
+                    chat_completion_chunk(
+                        completion_id,
+                        model,
+                        created,
+                        finish_reason="stop",
+                        usage=responses_usage_from_codex(result.usage),
+                    )
+                )
             self._write_done()
             return
         result = run_codex(
@@ -1312,6 +1315,7 @@ class CodexBridgeServer(ThreadingHTTPServer):
         bypass_sandbox: bool,
         api_key: str | None,
         progress_interval: int,
+        openwebui_chat_compat_stream: bool,
         verbose: bool,
     ) -> None:
         super().__init__(server_address, handler_class)
@@ -1324,6 +1328,7 @@ class CodexBridgeServer(ThreadingHTTPServer):
         self.bypass_sandbox = bypass_sandbox
         self.api_key = api_key
         self.progress_interval = progress_interval
+        self.openwebui_chat_compat_stream = openwebui_chat_compat_stream
         self.verbose = verbose
 
 
@@ -1352,6 +1357,18 @@ def parse_args() -> argparse.Namespace:
         "--api-key",
         default=read_secret_value(os.getenv("CODEX_BRIDGE_API_KEY"), os.getenv("CODEX_BRIDGE_API_KEY_FILE")),
     )
+    parser.add_argument(
+        "--openwebui-chat-compat-stream",
+        action="store_true",
+        default=is_truthy(
+            os.getenv("CODEX_BRIDGE_OPENWEBUI_CHAT_COMPAT_STREAM")
+            or os.getenv("CODEX_BRIDGE_OPENWEBUI_CHAT_COMPAT")
+        ),
+        help=(
+            "Mirror Responses text deltas as chat.completion.chunk data events for OpenWebUI chat rendering. "
+            "Responses lifecycle events remain enabled."
+        ),
+    )
     parser.add_argument("--workdir", default=os.getenv("CODEX_BRIDGE_WORKDIR", str(Path(__file__).resolve().parents[1])))
     parser.add_argument("--verbose", action="store_true")
     return parser.parse_args()
@@ -1372,6 +1389,7 @@ def main() -> int:
         bypass_sandbox=args.bypass_sandbox,
         api_key=args.api_key,
         progress_interval=args.progress_interval,
+        openwebui_chat_compat_stream=args.openwebui_chat_compat_stream,
         verbose=args.verbose,
     )
     print(f"Codex OpenAI bridge listening on http://{args.host}:{args.port}/v1", flush=True)

@@ -98,6 +98,10 @@ Bei `stream=true` sendet die Bridge sofort Responses-API-SSE-Events und sichtbar
 
 Der Responses-Eingang akzeptiert sowohl OpenAI-Responses-Items mit `type: "message"` als auch die kompakte Message-Listenform mit `role` und `content`; Assistant-History mit `output_text` wird dabei korrekt als Assistenzkontext gelesen. Die gestreamten Responses-Events enthalten `item_id`, `output_index` und `content_index`; `response.completed` übernimmt die von Codex gemeldete Usage inklusive Reasoning- und Cache-Token, sofern Codex diese Werte liefert.
 
+Für OpenWebUI-Instanzen, deren Chatpfad Responses-Provider intern weiter über den Chat-Completion-Renderer ausgibt, kann `CODEX_BRIDGE_OPENWEBUI_CHAT_COMPAT_STREAM=true` gesetzt werden. Dann bleibt `/v1/responses` der Provider-Endpunkt, aber die Bridge spiegelt sichtbare Textdeltas zusätzlich als `chat.completion.chunk`-Datenereignisse. OpenWebUI kann dadurch die laufenden Codex-Schritte direkt im Chat anzeigen, während Responses-Lifecycle, finale `response.completed`-Payload und Usage weiterhin gesendet werden. In diesem Kompatibilitätsmodus werden die `response.output_text.delta`-Events unterdrückt, damit OpenWebUI denselben Inhalt nicht doppelt rendert; der vollständige Text steckt weiter in den finalen Responses-Events.
+
+Wichtig für die OpenWebUI-Oberfläche: Live-Ausgaben im Hauptchat laufen über Socket.IO und benötigen im Browser eine normale OpenWebUI-JWT-Session. Eine reine API-Key-Session kann REST-Aufrufe ausführen und Antworten in der Datenbank speichern, erhält aber keine `user:<id>`-Socket-Events; dann erscheint der Text erst nach einem Reload. Wenn Playwright oder ein anderes Testwerkzeug per API-Key authentifiziert wurde, vor dem Live-Test regulär einloggen oder ein gültiges JWT-Cookie setzen.
+
 Das Docker-Image enthält Werkzeuge, die Codex in typischen Container-Läufen braucht: `bash`, `bubblewrap`, `curl`, `wget`, `jq`, `ripgrep`, `fd`, `git`, Python mit `pip`/`venv`, Build-Basis sowie Playwright mit Chromium.
 
 ## Sicherheit

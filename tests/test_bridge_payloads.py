@@ -10,6 +10,7 @@ from src.codex_openai_bridge import (
     CodexBridgeHandler,
     VisibleDelta,
     build_prompt_from_responses,
+    chat_completion_chunk,
     codex_json_event_message,
     compress_output,
     describe_shell_command,
@@ -185,6 +186,16 @@ class BridgePayloadTests(unittest.TestCase):
         self.assertIn("event: response.output_text.delta\n", raw)
         payload = json.loads(raw.split("data: ", 1)[1])
         self.assertEqual(payload["delta"], "Hallo")
+
+    def test_openwebui_compat_chat_chunk_shape(self):
+        chunk = chat_completion_chunk("chatcmpl_1", "coder", 123, content="Status\n")
+        self.assertEqual(chunk["object"], "chat.completion.chunk")
+        self.assertEqual(chunk["choices"][0]["delta"]["content"], "Status\n")
+        self.assertIsNone(chunk["choices"][0]["finish_reason"])
+
+        stop_chunk = chat_completion_chunk("chatcmpl_1", "coder", 123, finish_reason="stop")
+        self.assertEqual(stop_chunk["choices"][0]["delta"], {})
+        self.assertEqual(stop_chunk["choices"][0]["finish_reason"], "stop")
 
     def test_chat_completions_fallback_exists_but_responses_is_documented_default(self):
         self.assertTrue(callable(CodexBridgeHandler._chat_completions))
