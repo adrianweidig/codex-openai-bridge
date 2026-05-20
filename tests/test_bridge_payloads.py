@@ -7,7 +7,9 @@ from src.codex_openai_bridge import (
     build_prompt_from_responses,
     codex_json_event_message,
     compress_output,
+    describe_shell_command,
     parse_model_list,
+    progress_delta,
     public_codex_log_line,
     read_secret_value,
     responses_result,
@@ -52,7 +54,10 @@ class BridgePayloadTests(unittest.TestCase):
         self.assertIsNone(public_codex_log_line("stdout", "final answer"))
 
     def test_codex_json_event_message(self):
-        self.assertEqual(codex_json_event_message({"type": "turn.started"}), "beginnt mit der Bearbeitung.")
+        self.assertEqual(
+            codex_json_event_message({"type": "turn.started"}),
+            "Aufgabe angenommen; Codex analysiert den nächsten sinnvollen Schritt.",
+        )
         self.assertEqual(
             codex_json_event_message(
                 {
@@ -60,10 +65,10 @@ class BridgePayloadTests(unittest.TestCase):
                     "item": {"type": "command_execution", "command": "/bin/bash -lc ls"},
                 }
             ),
-            "$ /bin/bash -lc ls",
+            "Startet: listet das aktuelle Verzeichnis.",
         )
         self.assertIn(
-            "Ausgabe:",
+            "```text",
             codex_json_event_message(
                 {
                     "type": "item.completed",
@@ -87,6 +92,17 @@ class BridgePayloadTests(unittest.TestCase):
         self.assertIn("Zeilen ausgelassen", compressed)
         self.assertIn("line-0", compressed)
         self.assertIn("line-59", compressed)
+
+    def test_describe_shell_command(self):
+        summary, done = describe_shell_command(
+            "/bin/bash -lc \"sed -n '1,220p' /home/codex/.codex/plugins/cache/skill/SKILL.md\""
+        )
+        self.assertIn("liest", summary)
+        self.assertIn("Zeilen 1-220", summary)
+        self.assertEqual(done, "Datei gelesen")
+
+    def test_progress_delta_is_markdown(self):
+        self.assertEqual(progress_delta("arbeitet."), "**Codex**: arbeitet.\n\n")
 
 
 if __name__ == "__main__":

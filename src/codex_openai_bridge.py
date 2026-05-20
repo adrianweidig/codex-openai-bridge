@@ -5,8 +5,12 @@ import argparse
 import json
 import os
 import queue
+import re
+import select
+import shlex
 import signal
 import shutil
+import socket
 import subprocess
 import tempfile
 import threading
@@ -78,7 +82,69 @@ def command_output_block(value: str) -> str:
     compact = compress_output(value)
     if not compact:
         return ""
-    return f"\nAusgabe:\n```text\n{compact}\n```"
+    return f"\n\nAusgabe:\n```text\n{compact}\n```"
+
+
+def strip_shell_wrapper(command: str) -> str:
+    try:
+        parts = shlex.split(command)
+    except ValueError:
+        return command.strip()
+    if len(parts) >= 3 and parts[0] in {"/bin/bash", "bash", "/bin/sh", "sh"} and parts[1] in {"-lc", "-c"}:
+        return parts[2].strip()
+    return command.strip()
+
+
+def compact_path(value: str, max_length: int = 90) -> str:
+    path = value.strip().strip("'\"")
+    if len(path) <= max_length:
+        return path
+    parts = re.split(r"([/\\])", path)
+    if len(parts) >= 5:
+        tail = "".join(parts[-5:])
+        return f".../{tail}" if "/" in path else f"...\\{tail}"
+    return "..." + path[-max_length + 3 :]
+
+
+def describe_shell_command(command: str) -> tuple[str, str]:
+    inner = strip_shell_wrapper(command)
+    try:
+        parts = shlex.split(inner)
+    except ValueError:
+        parts = []
+    executable = Path(parts[0]).name if parts else ""
+
+    sed_match = re.search(r"sed\s+-n\s+['\"]?([0-9]+),([0-9]+)p['\"]?\s+(.+)$", inner)
+    if sed_match:
+        start, end, path = sed_match.groups()
+        return f"liest {compact_path(path)} (Zeilen {start}-{end})", "Datei gelesen"
+
+    if executable in {"rg", "ripgrep"}:
+        query = next((part for part in parts[1:] if not part.startswith("-")), "")
+        target = parts[-1] if len(parts) > 2 else ""
+        if query and target and target != query:
+            return f"sucht nach `{sanitize_log_line(query, 80)}` in {compact_path(target)}", "Suche abgeschlossen"
+        if query:
+            return f"sucht nach `{sanitize_log_line(query, 80)}`", "Suche abgeschlossen"
+        return "sucht im Arbeitsbereich", "Suche abgeschlossen"
+
+    if executable in {"cat", "type"} and len(parts) >= 2:
+        return f"liest {compact_path(parts[-1])}", "Datei gelesen"
+    if executable in {"ls", "dir"}:
+        target = compact_path(parts[-1]) if len(parts) >= 2 and not parts[-1].startswith("-") else "das aktuelle Verzeichnis"
+        return f"listet {target}", "Verzeichnis gelesen"
+    if executable in {"python", "python3"}:
+        return "führt Python aus", "Python-Lauf abgeschlossen"
+    if executable in {"node", "npm", "npx", "pnpm", "yarn"}:
+        return f"führt {executable} aus", f"{executable}-Lauf abgeschlossen"
+    if executable == "git":
+        action = parts[1] if len(parts) > 1 else "Befehl"
+        return f"prüft Git: `{sanitize_log_line(action, 60)}`", "Git-Schritt abgeschlossen"
+    if executable == "docker":
+        action = parts[1] if len(parts) > 1 else "Befehl"
+        return f"nutzt Docker: `{sanitize_log_line(action, 60)}`", "Docker-Schritt abgeschlossen"
+
+    return f"führt Shell-Schritt aus: `{sanitize_log_line(inner, 180)}`", "Shell-Schritt abgeschlossen"
 
 
 def public_codex_log_line(stream_name: str, line: str) -> str | None:
@@ -110,9 +176,9 @@ def codex_json_event_message(event: dict[str, Any]) -> str | None:
     if event_type == "thread.started":
         thread_id = str(event.get("thread_id") or "")
         short_id = thread_id[-12:] if len(thread_id) > 12 else thread_id
-        return f"Session gestartet ({short_id})." if short_id else "Session gestartet."
+        return f"Codex-Session `{short_id}` gestartet." if short_id else "Codex-Session gestartet."
     if event_type == "turn.started":
-        return "beginnt mit der Bearbeitung."
+        return "Aufgabe angenommen; Codex analysiert den nächsten sinnvollen Schritt."
     if event_type == "turn.completed":
         usage = event.get("usage") if isinstance(event.get("usage"), dict) else {}
         input_tokens = usage.get("input_tokens")
@@ -136,17 +202,18 @@ def codex_json_event_message(event: dict[str, Any]) -> str | None:
     status = str(item.get("status") or "")
     if item_type == "reasoning":
         if event_type == "item.started":
-            return "denkt nach."
-        return "Denkschritt abgeschlossen."
+            return "Denkt nach und plant den nächsten Schritt."
+        return "Planungsschritt abgeschlossen."
     if item_type == "command_execution":
-        command = sanitize_log_line(str(item.get("command") or "Shell-Befehl"), 220)
+        raw_command = str(item.get("command") or "Shell-Befehl")
+        summary, done_summary = describe_shell_command(raw_command)
         if event_type == "item.started":
-            return f"$ {command}"
+            return f"Startet: {summary}."
         exit_code = item.get("exit_code")
         output = command_output_block(str(item.get("aggregated_output") or ""))
         if status == "failed" or (isinstance(exit_code, int) and exit_code != 0):
-            return f"Befehl fehlgeschlagen (Exit {exit_code}): `{command}`.{output}"
-        return f"Befehl abgeschlossen (Exit {exit_code}): `{command}`.{output}"
+            return f"{done_summary} mit Fehler (Exit {exit_code}).{output}"
+        return f"{done_summary} (Exit {exit_code}).{output}"
 
     if item_type in {"tool_call", "function_call"}:
         name = sanitize_log_line(str(item.get("name") or item.get("tool_name") or "Tool"), 160)
@@ -334,6 +401,7 @@ def run_codex(
     request_id: str,
     progress_callback: Callable[[str], None] | None = None,
     progress_interval: int = 15,
+    disconnect_checker: Callable[[], bool] | None = None,
 ) -> str:
     target_model = MODEL_ALIASES.get(model, model)
     temp_dir: Path | None = None
@@ -378,7 +446,7 @@ def run_codex(
             prompt_chars=len(prompt),
         )
         if progress_callback:
-            progress_callback(f"gestartet mit Modell {target_model}; warte auf Codex.")
+            progress_callback(f"Modell `{target_model}` gestartet; warte auf erste Codex-Aktivität.")
 
         process = subprocess.Popen(
             command,
@@ -398,7 +466,7 @@ def run_codex(
         def read_stream(stream_name: str, stream: Any) -> None:
             try:
                 for line in stream:
-                    output_queue.put((stream_name, sanitize_log_line(line)))
+                    output_queue.put((stream_name, line.rstrip("\r\n")))
             finally:
                 output_queue.put((stream_name, None))
 
@@ -419,9 +487,16 @@ def run_codex(
         started_at = time.monotonic()
         next_progress = started_at + max(1, progress_interval)
         active_readers = len(readers)
+        current_activity = "Codex initialisiert die Ausführung"
 
         while active_readers:
             now = time.monotonic()
+            if disconnect_checker and not disconnect_checker():
+                elapsed = int(now - started_at)
+                if process.poll() is None:
+                    stop_process(process, request_id, "client_disconnected")
+                log_event("client.disconnected", request_id=request_id, elapsed_seconds=elapsed)
+                raise ClientDisconnected()
             if process.poll() is None and now - started_at > timeout:
                 elapsed = round(now - started_at, 1)
                 stop_process(process, request_id, "timeout")
@@ -431,7 +506,7 @@ def run_codex(
             if progress_callback and now >= next_progress:
                 elapsed = int(now - started_at)
                 try:
-                    progress_callback(f"läuft seit {elapsed}s; Codex verarbeitet die Anfrage noch.")
+                    progress_callback(f"arbeitet seit {elapsed}s weiter: {current_activity}.")
                 except (BrokenPipeError, ConnectionResetError, OSError):
                     if process.poll() is None:
                         stop_process(process, request_id, "client_disconnected")
@@ -452,9 +527,9 @@ def run_codex(
                 continue
 
             if stream_name == "stdout":
-                stdout_tail = (stdout_tail + [line])[-20:]
+                stdout_tail = (stdout_tail + [sanitize_log_line(line)])[-20:]
             else:
-                stderr_tail = (stderr_tail + [line])[-20:]
+                stderr_tail = (stderr_tail + [sanitize_log_line(line)])[-20:]
 
             if stream_name == "stdout":
                 try:
@@ -464,13 +539,16 @@ def run_codex(
                 if isinstance(codex_event, dict):
                     event_type = str(codex_event.get("type") or "")
                     message = codex_json_event_message(codex_event)
+                    message_preview = message.split("\n", 1)[0] if message else None
                     log_event(
                         "codex.event",
                         request_id=request_id,
                         codex_event=event_type,
-                        message=message,
+                        message=sanitize_log_line(message_preview or "", 500) if message_preview else None,
+                        visible_chars=len(message) if message else None,
                     )
                     if message and progress_callback:
+                        current_activity = message.split("\n", 1)[0].rstrip(".")
                         try:
                             progress_callback(message)
                         except (BrokenPipeError, ConnectionResetError, OSError):
@@ -483,7 +561,12 @@ def run_codex(
 
             public_line = public_codex_log_line(stream_name, line)
             if public_line:
-                log_event("codex.output", request_id=request_id, stream=stream_name, line=public_line)
+                log_event(
+                    "codex.output",
+                    request_id=request_id,
+                    stream=stream_name,
+                    line=sanitize_log_line(public_line),
+                )
             else:
                 log_event("codex.activity", request_id=request_id, stream=stream_name, chars=len(line))
 
@@ -553,6 +636,10 @@ def responses_result(response_id: str, message_id: str, model: str, text: str, c
         "output_text": text,
         "usage": {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0},
     }
+
+
+def progress_delta(message: str) -> str:
+    return f"**Codex**: {message}\n\n"
 
 
 class CodexBridgeHandler(BaseHTTPRequestHandler):
@@ -628,6 +715,17 @@ class CodexBridgeHandler(BaseHTTPRequestHandler):
         except (BrokenPipeError, ConnectionResetError, OSError) as exc:
             raise ClientDisconnected() from exc
 
+    def _client_connected(self) -> bool:
+        try:
+            readable, _, _ = select.select([self.connection], [], [], 0)
+            if not readable:
+                return True
+            return bool(self.connection.recv(1, socket.MSG_PEEK))
+        except BlockingIOError:
+            return True
+        except (BrokenPipeError, ConnectionResetError, OSError):
+            return False
+
     def _chat_completions(self, payload: dict[str, Any]) -> None:
         model = str(payload.get("model") or "coder")
         prompt = build_prompt(payload.get("messages") or [])
@@ -654,7 +752,7 @@ class CodexBridgeHandler(BaseHTTPRequestHandler):
             progress_text: list[str] = []
 
             def send_progress(message: str) -> None:
-                delta = f"[Codex] {message}\n"
+                delta = progress_delta(message)
                 progress_text.append(delta)
                 self._sse_event(
                     {
@@ -679,6 +777,7 @@ class CodexBridgeHandler(BaseHTTPRequestHandler):
                     request_id=request_id,
                     progress_callback=send_progress,
                     progress_interval=self.server.progress_interval,
+                    disconnect_checker=self._client_connected,
                 )
             except ClientDisconnected:
                 raise
@@ -789,7 +888,7 @@ class CodexBridgeHandler(BaseHTTPRequestHandler):
             progress_text: list[str] = []
 
             def send_progress(message: str) -> None:
-                delta = f"[Codex] {message}\n"
+                delta = progress_delta(message)
                 progress_text.append(delta)
                 self._sse_event(
                     {
@@ -813,6 +912,7 @@ class CodexBridgeHandler(BaseHTTPRequestHandler):
                     request_id=request_id,
                     progress_callback=send_progress,
                     progress_interval=self.server.progress_interval,
+                    disconnect_checker=self._client_connected,
                 )
             except ClientDisconnected:
                 raise
