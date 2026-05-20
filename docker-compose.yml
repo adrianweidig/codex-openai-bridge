@@ -1,0 +1,30 @@
+services:
+  codex-openai-bridge:
+    build:
+      context: .
+    image: codex-openai-bridge:latest
+    container_name: codex-openai-bridge
+    restart: unless-stopped
+    environment:
+      CODEX_HOME: /home/codex/.codex
+      CODEX_BRIDGE_HOST: 0.0.0.0
+      CODEX_BRIDGE_PORT: 4010
+      CODEX_BRIDGE_WORKDIR: /workspace
+      CODEX_BRIDGE_API_KEY: ${CODEX_BRIDGE_API_KEY:-}
+      CODEX_BRIDGE_MODELS: ${CODEX_BRIDGE_MODELS:-coder,codex,gpt-5.5,gpt-5.4,gpt-5.4-mini,gpt-5.3-codex,gpt-5.3-codex-spark}
+      CODEX_BRIDGE_TIMEOUT: ${CODEX_BRIDGE_TIMEOUT:-900}
+    ports:
+      - "${CODEX_BRIDGE_PUBLISHED_PORT:-4010}:4010"
+    volumes:
+      - codex_home:/home/codex/.codex
+      - ./workspace:/workspace
+    networks:
+      - openwebui_ai_net
+
+volumes:
+  codex_home:
+
+networks:
+  openwebui_ai_net:
+    name: ${OPENWEBUI_DOCKER_NETWORK:-ai_net}
+    external: true

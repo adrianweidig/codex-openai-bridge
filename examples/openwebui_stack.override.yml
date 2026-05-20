@@ -1,0 +1,29 @@
+# Add this service to your existing openwebui_stack compose file.
+# The service joins the same ai_net network as open-webui.
+services:
+  codex-openai-bridge:
+    image: codex-openai-bridge:latest
+    build:
+      context: .
+    container_name: codex-openai-bridge
+    restart: unless-stopped
+    environment:
+      CODEX_HOME: /home/codex/.codex
+      CODEX_BRIDGE_HOST: 0.0.0.0
+      CODEX_BRIDGE_PORT: 4010
+      CODEX_BRIDGE_WORKDIR: /workspace
+      CODEX_BRIDGE_API_KEY: ${CODEX_BRIDGE_API_KEY}
+      CODEX_BRIDGE_MODELS: coder,codex,gpt-5.5,gpt-5.4,gpt-5.4-mini,gpt-5.3-codex,gpt-5.3-codex-spark
+    volumes:
+      - codex_home:/home/codex/.codex
+      - codex_bridge_workspace:/workspace
+    networks:
+      - ai_net
+
+volumes:
+  codex_home:
+  codex_bridge_workspace:
+
+networks:
+  ai_net:
+    external: true
