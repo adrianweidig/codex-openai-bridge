@@ -52,6 +52,8 @@ Modelle prüfen:
 curl -H "Authorization: Bearer $CODEX_BRIDGE_API_KEY" http://localhost:4010/v1/models
 ```
 
+Ohne diesen Header antwortet `/v1/models` absichtlich mit `401 Unauthorized`. Für einfache Browser-Checks ist `/health` ohne Auth freigegeben.
+
 ## OpenWebUI-Konfiguration
 
 Wenn der Bridge-Container im selben Docker-Netz wie OpenWebUI läuft, ist die interne Provider-URL:
@@ -85,6 +87,12 @@ coder,codex,gpt-5.5,gpt-5.4,gpt-5.4-mini,gpt-5.3-codex,gpt-5.3-codex-spark
 `coder` und `codex` werden intern auf `gpt-5.5` abgebildet, damit vorhandene OpenWebUI-Custom-Modelle mit `base_model_id: coder` ohne weitere Anpassung gegen Codex laufen können.
 
 Die Liste kann über `CODEX_BRIDGE_MODELS` überschrieben werden.
+
+## Logs und Streaming
+
+Die Bridge schreibt strukturierte JSON-Zeilen nach `stdout`, sichtbar über `docker logs` oder Portainer. Geloggt werden Request-Start, Codex-Start, sichere Codex-Metadaten, Heartbeats, Fehler und Abschluss. Prompt- und Antwortinhalte werden nicht in die Container-Logs geschrieben.
+
+Bei `stream=true` sendet die Bridge sofort Responses-API-SSE-Events und danach sichtbare `[Codex]`-Fortschrittsdeltas. Das Intervall wird über `CODEX_BRIDGE_PROGRESS_INTERVAL` gesteuert.
 
 ## Sicherheit
 

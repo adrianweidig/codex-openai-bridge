@@ -3,7 +3,13 @@ import unittest
 import tempfile
 from pathlib import Path
 
-from src.codex_openai_bridge import build_prompt_from_responses, parse_model_list, read_secret_value, responses_result
+from src.codex_openai_bridge import (
+    build_prompt_from_responses,
+    parse_model_list,
+    public_codex_log_line,
+    read_secret_value,
+    responses_result,
+)
 
 
 class BridgePayloadTests(unittest.TestCase):
@@ -36,6 +42,12 @@ class BridgePayloadTests(unittest.TestCase):
             path.write_text("abc123\n", encoding="utf-8")
             self.assertEqual(read_secret_value(None, str(path)), "abc123")
             self.assertEqual(read_secret_value("direct", str(path)), "direct")
+
+    def test_public_codex_log_line_redacts_prompt_content(self):
+        self.assertEqual(public_codex_log_line("stderr", "model: gpt-5.5"), "model: gpt-5.5")
+        self.assertIsNone(public_codex_log_line("stderr", "USER:"))
+        self.assertIsNone(public_codex_log_line("stderr", "vertraulicher prompt"))
+        self.assertIsNone(public_codex_log_line("stdout", "final answer"))
 
 
 if __name__ == "__main__":

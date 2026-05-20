@@ -87,6 +87,7 @@ CODEX_BRIDGE_PUBLISHED_PORT=${CODEX_BRIDGE_PUBLISHED_PORT}
 OPENWEBUI_DOCKER_NETWORK=${OPENWEBUI_DOCKER_NETWORK}
 CODEX_BRIDGE_MODELS=${CODEX_BRIDGE_MODELS}
 CODEX_BRIDGE_TIMEOUT=${CODEX_BRIDGE_TIMEOUT}
+CODEX_BRIDGE_PROGRESS_INTERVAL=${CODEX_BRIDGE_PROGRESS_INTERVAL}
 CODEX_BRIDGE_SECRET_FILE=${SECRET_FILE}
 OPENWEBUI_BASE_URL=${OPENWEBUI_BASE_URL}
 CODEX_BRIDGE_OPENWEBUI_URL=${CODEX_BRIDGE_OPENWEBUI_URL}
@@ -123,6 +124,7 @@ services:
       CODEX_BRIDGE_API_KEY_FILE: /run/secrets/codex_bridge_api_key
       CODEX_BRIDGE_MODELS: ${CODEX_BRIDGE_MODELS}
       CODEX_BRIDGE_TIMEOUT: ${CODEX_BRIDGE_TIMEOUT:-900}
+      CODEX_BRIDGE_PROGRESS_INTERVAL: ${CODEX_BRIDGE_PROGRESS_INTERVAL:-15}
     secrets:
       - codex_bridge_api_key
     ports:
@@ -193,6 +195,7 @@ CODEX_BRIDGE_OPENWEBUI_URL="$(prompt_default 'Interne Bridge-URL aus Sicht des O
 CODEX_BRIDGE_PUBLISHED_PORT="$(prompt_default 'Host-Port für Bridge-Healthcheck und lokale Tests' '4010')"
 CODEX_BRIDGE_MODELS="$(prompt_default 'Kommagetrennte Modell-IDs, die die Bridge anbieten soll' "$DEFAULT_MODELS")"
 CODEX_BRIDGE_TIMEOUT="$(prompt_default 'Timeout pro Codex-Aufruf in Sekunden' '900')"
+CODEX_BRIDGE_PROGRESS_INTERVAL="$(prompt_default 'Sekunden zwischen sichtbaren Fortschrittsmeldungen im Streaming' '15')"
 CODEX_BRIDGE_API_KEY="$(prompt_default 'Lokaler Bridge-API-Key für OpenWebUI Provider' "$generated_key")"
 
 print_step "Dateien erzeugen"

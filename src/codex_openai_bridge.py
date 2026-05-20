@@ -4,14 +4,16 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import queue
 import shutil
 import subprocess
 import tempfile
+import threading
 import time
 import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 
 MODEL_ALIASES = {
@@ -28,6 +30,48 @@ DEFAULT_MODELS = [
     "gpt-5.3-codex",
     "gpt-5.3-codex-spark",
 ]
+
+
+def log_event(event: str, **fields: Any) -> None:
+    record: dict[str, Any] = {
+        "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "event": event,
+    }
+    for key, value in fields.items():
+        if value is not None:
+            record[key] = value
+    print(json.dumps(record, ensure_ascii=False), flush=True)
+
+
+def sanitize_log_line(value: str, max_length: int = 1200) -> str:
+    clean = value.replace("\r", "").strip()
+    if len(clean) <= max_length:
+        return clean
+    return clean[: max_length - 1] + "…"
+
+
+def public_codex_log_line(stream_name: str, line: str) -> str | None:
+    if stream_name == "stdout":
+        return None
+    lower = line.lower()
+    safe_prefixes = (
+        "openai codex",
+        "workdir:",
+        "model:",
+        "provider:",
+        "approval:",
+        "sandbox:",
+        "reasoning effort:",
+        "reasoning summaries:",
+        "session id:",
+        "warning:",
+        "tokens used",
+    )
+    if any(lower.startswith(prefix) for prefix in safe_prefixes):
+        return line
+    if line == "--------" or line.replace(",", "").isdigit():
+        return line
+    return None
 
 
 def parse_model_list(value: str | None) -> list[str] | None:
@@ -172,6 +216,9 @@ def run_codex(
     workdir: Path,
     codex_command: str | None,
     use_windows_codex: bool,
+    request_id: str,
+    progress_callback: Callable[[str], None] | None = None,
+    progress_interval: int = 15,
 ) -> str:
     target_model = MODEL_ALIASES.get(model, model)
     temp_dir: Path | None = None
@@ -199,20 +246,117 @@ def run_codex(
             output_arg,
             "-",
         ]
-        completed = subprocess.run(
+        command_label = " ".join(command[:2]) if len(command) > 1 else command[0]
+        log_event(
+            "codex.start",
+            request_id=request_id,
+            model=model,
+            target_model=target_model,
+            timeout_seconds=timeout,
+            workdir=str(workdir),
+            command=command_label,
+            prompt_chars=len(prompt),
+        )
+        if progress_callback:
+            progress_callback(f"gestartet mit Modell {target_model}; warte auf Codex.")
+
+        process = subprocess.Popen(
             command,
             cwd=workdir,
-            input=prompt,
+            stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
-            timeout=timeout,
-            check=False,
+            bufsize=1,
         )
-        if completed.returncode != 0:
-            detail = (completed.stderr or completed.stdout or "codex exec failed").strip()
+
+        output_queue: queue.Queue[tuple[str, str | None]] = queue.Queue()
+        stdout_tail: list[str] = []
+        stderr_tail: list[str] = []
+
+        def read_stream(stream_name: str, stream: Any) -> None:
+            try:
+                for line in stream:
+                    output_queue.put((stream_name, sanitize_log_line(line)))
+            finally:
+                output_queue.put((stream_name, None))
+
+        readers = [
+            threading.Thread(target=read_stream, args=("stdout", process.stdout), daemon=True),
+            threading.Thread(target=read_stream, args=("stderr", process.stderr), daemon=True),
+        ]
+        for reader in readers:
+            reader.start()
+
+        try:
+            if process.stdin:
+                process.stdin.write(prompt)
+                process.stdin.close()
+        except BrokenPipeError:
+            pass
+
+        started_at = time.monotonic()
+        next_progress = started_at + max(1, progress_interval)
+        active_readers = len(readers)
+
+        while active_readers:
+            now = time.monotonic()
+            if process.poll() is None and now - started_at > timeout:
+                process.kill()
+                elapsed = round(now - started_at, 1)
+                log_event("codex.timeout", request_id=request_id, elapsed_seconds=elapsed)
+                raise TimeoutError(f"codex exec timed out after {timeout} seconds")
+
+            if progress_callback and now >= next_progress:
+                elapsed = int(now - started_at)
+                try:
+                    progress_callback(f"läuft seit {elapsed}s; Codex verarbeitet die Anfrage noch.")
+                except (BrokenPipeError, ConnectionResetError, OSError):
+                    if process.poll() is None:
+                        process.kill()
+                    log_event("client.disconnected", request_id=request_id, elapsed_seconds=elapsed)
+                    raise
+                log_event("codex.progress", request_id=request_id, elapsed_seconds=elapsed)
+                next_progress = now + max(1, progress_interval)
+
+            try:
+                stream_name, line = output_queue.get(timeout=0.5)
+            except queue.Empty:
+                continue
+
+            if line is None:
+                active_readers -= 1
+                continue
+            if not line:
+                continue
+
+            if stream_name == "stdout":
+                stdout_tail = (stdout_tail + [line])[-20:]
+            else:
+                stderr_tail = (stderr_tail + [line])[-20:]
+            public_line = public_codex_log_line(stream_name, line)
+            if public_line:
+                log_event("codex.output", request_id=request_id, stream=stream_name, line=public_line)
+            else:
+                log_event("codex.activity", request_id=request_id, stream=stream_name, chars=len(line))
+
+        returncode = process.wait(timeout=2)
+        elapsed = round(time.monotonic() - started_at, 1)
+        if returncode != 0:
+            detail = "\n".join(stderr_tail or stdout_tail or ["codex exec failed"]).strip()
+            log_event("codex.failed", request_id=request_id, returncode=returncode, elapsed_seconds=elapsed)
             raise RuntimeError(detail[-2000:])
-        return output_path.read_text(encoding="utf-8", errors="replace").strip()
+        text = output_path.read_text(encoding="utf-8", errors="replace").strip()
+        log_event(
+            "codex.done",
+            request_id=request_id,
+            returncode=returncode,
+            elapsed_seconds=elapsed,
+            output_chars=len(text),
+        )
+        if progress_callback:
+            progress_callback(f"abgeschlossen nach {elapsed}s; übertrage Antwort.")
+        return text
     finally:
         output_path.unlink(missing_ok=True)
 
@@ -287,6 +431,7 @@ class CodexBridgeHandler(BaseHTTPRequestHandler):
     def _require_authorized(self) -> bool:
         if self._is_authorized():
             return True
+        log_event("request.unauthorized", path=self.path)
         self._json_response(401, {"error": {"message": "Unauthorized", "type": "authentication_error"}})
         return False
 
@@ -315,6 +460,9 @@ class CodexBridgeHandler(BaseHTTPRequestHandler):
         self._json_response(404, {"error": {"message": "Not found"}})
 
     def _sse_event(self, payload: Any) -> None:
+        event_type = payload.get("type") if isinstance(payload, dict) else None
+        if event_type:
+            self.wfile.write(f"event: {event_type}\n".encode("utf-8"))
         self.wfile.write(f"data: {json.dumps(payload, ensure_ascii=False)}\n\n".encode("utf-8"))
         self.wfile.flush()
 
@@ -323,20 +471,14 @@ class CodexBridgeHandler(BaseHTTPRequestHandler):
         prompt = build_prompt(payload.get("messages") or [])
         if not prompt:
             raise ValueError("messages must contain text content")
-        text = run_codex(
-            prompt,
-            model=model,
-            timeout=self.server.codex_timeout,
-            workdir=self.server.workdir,
-            codex_command=self.server.codex_command,
-            use_windows_codex=self.server.use_windows_codex,
-        )
         created = int(time.time())
         completion_id = f"chatcmpl-codex-{uuid.uuid4().hex}"
+        request_id = completion_id
         if payload.get("stream"):
             self.send_response(200)
             self.send_header("Content-Type", "text/event-stream; charset=utf-8")
             self.send_header("Cache-Control", "no-cache")
+            self.send_header("X-Accel-Buffering", "no")
             self.end_headers()
             self._sse_event(
                 {
@@ -347,6 +489,56 @@ class CodexBridgeHandler(BaseHTTPRequestHandler):
                     "choices": [{"index": 0, "delta": {"role": "assistant"}, "finish_reason": None}],
                 }
             )
+            progress_text: list[str] = []
+
+            def send_progress(message: str) -> None:
+                delta = f"[Codex] {message}\n"
+                progress_text.append(delta)
+                self._sse_event(
+                    {
+                        "id": completion_id,
+                        "object": "chat.completion.chunk",
+                        "created": created,
+                        "model": model,
+                        "choices": [{"index": 0, "delta": {"content": delta}, "finish_reason": None}],
+                    }
+                )
+
+            try:
+                text = run_codex(
+                    prompt,
+                    model=model,
+                    timeout=self.server.codex_timeout,
+                    workdir=self.server.workdir,
+                    codex_command=self.server.codex_command,
+                    use_windows_codex=self.server.use_windows_codex,
+                    request_id=request_id,
+                    progress_callback=send_progress,
+                    progress_interval=self.server.progress_interval,
+                )
+            except Exception as exc:
+                error_text = f"[Codex] Fehler: {exc}\n"
+                self._sse_event(
+                    {
+                        "id": completion_id,
+                        "object": "chat.completion.chunk",
+                        "created": created,
+                        "model": model,
+                        "choices": [{"index": 0, "delta": {"content": error_text}, "finish_reason": None}],
+                    }
+                )
+                self._sse_event(
+                    {
+                        "id": completion_id,
+                        "object": "chat.completion.chunk",
+                        "created": created,
+                        "model": model,
+                        "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
+                    }
+                )
+                self.wfile.write(b"data: [DONE]\n\n")
+                return
+
             for chunk in chunk_text(text):
                 self._sse_event(
                     {
@@ -368,13 +560,6 @@ class CodexBridgeHandler(BaseHTTPRequestHandler):
             )
             self.wfile.write(b"data: [DONE]\n\n")
             return
-        self._json_response(200, chat_completion_response(completion_id, model, text, created))
-
-    def _responses(self, payload: dict[str, Any]) -> None:
-        model = str(payload.get("model") or "coder")
-        prompt = build_prompt_from_responses(payload)
-        if not prompt:
-            raise ValueError("input must contain text content")
         text = run_codex(
             prompt,
             model=model,
@@ -382,14 +567,25 @@ class CodexBridgeHandler(BaseHTTPRequestHandler):
             workdir=self.server.workdir,
             codex_command=self.server.codex_command,
             use_windows_codex=self.server.use_windows_codex,
+            request_id=request_id,
+            progress_interval=self.server.progress_interval,
         )
+        self._json_response(200, chat_completion_response(completion_id, model, text, created))
+
+    def _responses(self, payload: dict[str, Any]) -> None:
+        model = str(payload.get("model") or "coder")
+        prompt = build_prompt_from_responses(payload)
+        if not prompt:
+            raise ValueError("input must contain text content")
         created = int(time.time())
         response_id = f"resp_codex_{uuid.uuid4().hex}"
         message_id = f"msg_codex_{uuid.uuid4().hex}"
+        request_id = response_id
         if payload.get("stream"):
             self.send_response(200)
             self.send_header("Content-Type", "text/event-stream; charset=utf-8")
             self.send_header("Cache-Control", "no-cache")
+            self.send_header("X-Accel-Buffering", "no")
             self.end_headers()
             base_response = {
                 "id": response_id,
@@ -422,6 +618,73 @@ class CodexBridgeHandler(BaseHTTPRequestHandler):
                     "part": {"type": "output_text", "text": "", "annotations": []},
                 }
             )
+            progress_text: list[str] = []
+
+            def send_progress(message: str) -> None:
+                delta = f"[Codex] {message}\n"
+                progress_text.append(delta)
+                self._sse_event(
+                    {
+                        "type": "response.output_text.delta",
+                        "output_index": 0,
+                        "content_index": 0,
+                        "delta": delta,
+                    }
+                )
+
+            try:
+                text = run_codex(
+                    prompt,
+                    model=model,
+                    timeout=self.server.codex_timeout,
+                    workdir=self.server.workdir,
+                    codex_command=self.server.codex_command,
+                    use_windows_codex=self.server.use_windows_codex,
+                    request_id=request_id,
+                    progress_callback=send_progress,
+                    progress_interval=self.server.progress_interval,
+                )
+            except Exception as exc:
+                error_text = f"[Codex] Fehler: {exc}\n"
+                final_part = {"type": "output_text", "text": error_text, "annotations": []}
+                final_item = responses_message_item(message_id, error_text)
+                self._sse_event(
+                    {
+                        "type": "response.output_text.delta",
+                        "output_index": 0,
+                        "content_index": 0,
+                        "delta": error_text,
+                    }
+                )
+                self._sse_event(
+                    {
+                        "type": "response.output_text.done",
+                        "output_index": 0,
+                        "content_index": 0,
+                        "text": error_text,
+                    }
+                )
+                self._sse_event(
+                    {
+                        "type": "response.content_part.done",
+                        "output_index": 0,
+                        "content_index": 0,
+                        "part": final_part,
+                    }
+                )
+                self._sse_event({"type": "response.output_item.done", "output_index": 0, "item": final_item})
+                self._sse_event(
+                    {
+                        "type": "response.failed",
+                        "response": {
+                            **responses_result(response_id, message_id, model, error_text, created),
+                            "status": "failed",
+                        },
+                    }
+                )
+                self.wfile.write(b"data: [DONE]\n\n")
+                return
+
             for chunk in chunk_text(text):
                 self._sse_event(
                     {
@@ -431,14 +694,15 @@ class CodexBridgeHandler(BaseHTTPRequestHandler):
                         "delta": chunk,
                     }
                 )
-            final_part = {"type": "output_text", "text": text, "annotations": []}
-            final_item = responses_message_item(message_id, text)
+            visible_text = "".join(progress_text) + text
+            final_part = {"type": "output_text", "text": visible_text, "annotations": []}
+            final_item = responses_message_item(message_id, visible_text)
             self._sse_event(
                 {
                     "type": "response.output_text.done",
                     "output_index": 0,
                     "content_index": 0,
-                    "text": text,
+                    "text": visible_text,
                 }
             )
             self._sse_event(
@@ -453,11 +717,21 @@ class CodexBridgeHandler(BaseHTTPRequestHandler):
             self._sse_event(
                 {
                     "type": "response.completed",
-                    "response": responses_result(response_id, message_id, model, text, created),
+                    "response": responses_result(response_id, message_id, model, visible_text, created),
                 }
             )
             self.wfile.write(b"data: [DONE]\n\n")
             return
+        text = run_codex(
+            prompt,
+            model=model,
+            timeout=self.server.codex_timeout,
+            workdir=self.server.workdir,
+            codex_command=self.server.codex_command,
+            use_windows_codex=self.server.use_windows_codex,
+            request_id=request_id,
+            progress_interval=self.server.progress_interval,
+        )
         self._json_response(200, responses_result(response_id, message_id, model, text, created))
 
     def do_POST(self) -> None:  # noqa: N802
@@ -470,11 +744,22 @@ class CodexBridgeHandler(BaseHTTPRequestHandler):
 
         try:
             payload = self._read_json()
+            model = payload.get("model")
+            request_id = f"req_{uuid.uuid4().hex}"
+            log_event(
+                "request.start",
+                request_id=request_id,
+                path=path,
+                model=model,
+                stream=bool(payload.get("stream")),
+            )
             if path in {"/v1/responses", "/responses"}:
                 self._responses(payload)
             else:
                 self._chat_completions(payload)
+            log_event("request.done", request_id=request_id, path=path)
         except Exception as exc:
+            log_event("request.failed", path=path, error=str(exc))
             self._json_response(500, {"error": {"message": str(exc), "type": "codex_bridge_error"}})
 
     def log_message(self, format: str, *args: Any) -> None:
@@ -493,6 +778,7 @@ class CodexBridgeServer(ThreadingHTTPServer):
         codex_command: str | None,
         use_windows_codex: bool,
         api_key: str | None,
+        progress_interval: int,
         verbose: bool,
     ) -> None:
         super().__init__(server_address, handler_class)
@@ -502,6 +788,7 @@ class CodexBridgeServer(ThreadingHTTPServer):
         self.codex_command = codex_command
         self.use_windows_codex = use_windows_codex
         self.api_key = api_key
+        self.progress_interval = progress_interval
         self.verbose = verbose
 
 
@@ -511,6 +798,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--port", type=int, default=int(os.getenv("CODEX_BRIDGE_PORT", "4010")))
     parser.add_argument("--model", action="append", dest="models", help="Model id to expose. Can be passed multiple times.")
     parser.add_argument("--codex-timeout", type=int, default=int(os.getenv("CODEX_BRIDGE_TIMEOUT", "900")))
+    parser.add_argument(
+        "--progress-interval",
+        type=int,
+        default=int(os.getenv("CODEX_BRIDGE_PROGRESS_INTERVAL", "15")),
+        help="Seconds between visible streaming progress heartbeats.",
+    )
     parser.add_argument("--codex-command", default=os.getenv("CODEX_BRIDGE_CODEX_COMMAND"))
     parser.add_argument("--windows-codex", action="store_true", default=is_truthy(os.getenv("CODEX_BRIDGE_WINDOWS_CODEX")))
     parser.add_argument(
@@ -534,6 +827,7 @@ def main() -> int:
         codex_command=args.codex_command,
         use_windows_codex=args.windows_codex,
         api_key=args.api_key,
+        progress_interval=args.progress_interval,
         verbose=args.verbose,
     )
     print(f"Codex OpenAI bridge listening on http://{args.host}:{args.port}/v1", flush=True)

@@ -14,6 +14,7 @@ services:
       CODEX_BRIDGE_WORKDIR: /workspace
       CODEX_BRIDGE_API_KEY_FILE: /run/secrets/codex_bridge_api_key
       CODEX_BRIDGE_MODELS: coder,codex,gpt-5.5,gpt-5.4,gpt-5.4-mini,gpt-5.3-codex,gpt-5.3-codex-spark
+      CODEX_BRIDGE_PROGRESS_INTERVAL: "15"
     secrets:
       - codex_bridge_api_key
     volumes:
