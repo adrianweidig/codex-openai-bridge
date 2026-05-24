@@ -923,6 +923,13 @@ class CodexBridgeHandler(BaseHTTPRequestHandler):
         raw = self.rfile.read(length) if length else b"{}"
         return json.loads(raw.decode("utf-8"))
 
+    def _requested_model(self, payload: dict[str, Any]) -> str:
+        requested = str(payload.get("model") or "coder")
+        model = self.server.model_by_id.get(requested)
+        if model is None:
+            raise ValueError(f"Unknown model: {requested}")
+        return model
+
     def _is_authorized(self) -> bool:
         if not self.server.api_key:
             return True
@@ -990,7 +997,7 @@ class CodexBridgeHandler(BaseHTTPRequestHandler):
             return False
 
     def _chat_completions(self, payload: dict[str, Any]) -> None:
-        model = str(payload.get("model") or "coder")
+        model = self._requested_model(payload)
         prompt = build_prompt(payload.get("messages") or [])
         if not prompt:
             raise ValueError("messages must contain text content")
@@ -1059,7 +1066,7 @@ class CodexBridgeHandler(BaseHTTPRequestHandler):
         self._json_response(200, chat_completion_response(completion_id, model, result.text, created))
 
     def _responses(self, payload: dict[str, Any]) -> None:
-        model = str(payload.get("model") or "coder")
+        model = self._requested_model(payload)
         prompt = build_prompt_from_responses(payload)
         if not prompt:
             raise ValueError("input must contain text content")
@@ -1320,6 +1327,7 @@ class CodexBridgeServer(ThreadingHTTPServer):
     ) -> None:
         super().__init__(server_address, handler_class)
         self.models = models
+        self.model_by_id = {model: model for model in models}
         self.codex_timeout = codex_timeout
         self.workdir = workdir
         self.codex_command = codex_command

@@ -187,6 +187,13 @@ class BridgePayloadTests(unittest.TestCase):
         payload = json.loads(raw.split("data: ", 1)[1])
         self.assertEqual(payload["delta"], "Hallo")
 
+    def test_requested_model_uses_server_allowlist(self):
+        fake = SimpleNamespace(server=SimpleNamespace(model_by_id={"coder": "coder"}))
+        self.assertEqual(CodexBridgeHandler._requested_model(fake, {"model": "coder"}), "coder")
+        self.assertEqual(CodexBridgeHandler._requested_model(fake, {}), "coder")
+        with self.assertRaises(ValueError):
+            CodexBridgeHandler._requested_model(fake, {"model": "--help"})
+
     def test_openwebui_compat_chat_chunk_shape(self):
         chunk = chat_completion_chunk("chatcmpl_1", "coder", 123, content="Status\n")
         self.assertEqual(chunk["object"], "chat.completion.chunk")
