@@ -6,7 +6,10 @@ Neue Einträge landen zuerst unter `Unreleased`.
 
 ## Unreleased
 
-Noch keine Änderungen.
+### Security
+
+- GitHub Actions auf Node-24-kompatible Major-Versionen aktualisiert: `actions/checkout@v6`, `actions/setup-python@v6`, `github/codeql-action@v4`.
+- Docker-Basisimage auf `node:26-bookworm-slim` aktualisiert.
 
 ## 0.1.0 - 2026-05-24
 

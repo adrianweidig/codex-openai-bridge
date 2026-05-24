@@ -52,3 +52,6 @@ docker build -t codex-openai-bridge:dev .
 - Prompt- und Antwortinhalte dürfen nicht unnötig in Logs oder Dokumente übernommen werden.
 - `CODEX_BRIDGE_BYPASS_SANDBOX=true` nur als bewusstes Container-Sicherheitsmodell dokumentieren oder nutzen.
 - Der Dienst führt `codex exec` aus und darf nicht als öffentlich gehärteter Internetdienst beschrieben werden.
+- GitHub-Security-Alerts vor Abschluss jeder Security-Aufgabe über `gh api repos/adrianweidig/codex-openai-bridge/code-scanning/alerts`, `dependabot/alerts` und `secret-scanning/alerts` prüfen.
+- User-kontrollierte Werte dürfen nicht ungefiltert in `subprocess.Popen` oder andere Prozessaufrufe fließen; Modell-IDs müssen gegen `self.server.model_by_id` validiert bleiben.
+- GitHub-Actions-Updates prüfen, wenn Workflow-Warnungen auf veraltete Node-Runtimes oder Security-Tool-Versionen hinweisen.
