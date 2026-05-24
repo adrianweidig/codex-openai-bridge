@@ -1,37 +1,37 @@
 # Maintainer-Checkliste
 
-Diese Punkte erfordern Maintainer-Rechte, externe Plattformentscheidungen oder rechtliche Entscheidungen und wurden deshalb nicht automatisch umgesetzt.
+Diese Liste hält GitHub- und Maintainer-Aufgaben fest, die nicht allein aus Repository-Dateien ableitbar sind. Erledigte Punkte beschreiben den zuletzt gesetzten Zustand.
 
 ## GitHub Repository Settings
 
-- Repository-Beschreibung setzen, z. B. `OpenAI-compatible bridge that exposes local Codex CLI runs to OpenWebUI`.
-- Topics prüfen und setzen, z. B. `openwebui`, `codex`, `openai-compatible`, `responses-api`, `docker-compose`, `python`.
-- Repository-Sichtbarkeit bewusst festlegen. Der lokale Check zeigte das GitHub-Repository zuletzt als `PRIVATE`.
-- Issues aktivieren, wenn öffentliche Fehlerberichte erwünscht sind.
-- Discussions aktivieren, wenn Support- und Ideen-Austausch getrennt von Issues laufen soll.
-- Wiki deaktiviert lassen oder bewusst aktivieren; die Projektdokumentation liegt bereits im Repository.
+- Erledigt: Repository ist öffentlich.
+- Erledigt: Beschreibung ist gesetzt: `OpenAI-compatible bridge that exposes local Codex CLI runs to OpenWebUI`.
+- Erledigt: Topics sind gesetzt: `openwebui`, `codex`, `openai-compatible`, `responses-api`, `docker-compose`, `python`, `portainer`.
+- Erledigt: Issues sind aktiviert.
+- Erledigt: Discussions sind aktiviert.
+- Erledigt: Wiki ist deaktiviert; die Projektdokumentation liegt im Repository.
 
 ## Social Preview
 
-- `docs/assets/social-preview.svg` als Vorlage verwenden.
-- Optional als PNG im Format 1280 x 640 exportieren und in GitHub unter Settings -> Social preview hochladen.
+- `docs/assets/social-preview.svg` ist als Vorlage vorhanden.
+- Offen: GitHub Social Preview muss über die GitHub-Weboberfläche hochgeladen werden; für den Upload gibt es keinen stabilen `gh`-/REST-Workflow.
 
 ## Branch Protection
 
-- Branch Protection oder Ruleset für `main` einrichten.
-- Required Status Checks aktivieren:
-  - `python`
+- Erledigt: Branch Protection für `main` ist eingerichtet.
+- Erledigt: Required Status Checks sind aktiviert:
+  - `Python checks`
   - `CodeQL`
-- Pull Requests vor Merge verlangen.
-- Direktes Pushen nach `main` für Kollaborationsbetrieb einschränken.
+- Erledigt: Pull Requests vor Merge sind verlangt.
+- Erledigt: direkte Force-Pushes und Branch-Löschungen sind blockiert.
 
 ## Security
 
-- Private Vulnerability Reporting aktivieren, falls für das Repository verfügbar.
-- Dependabot Security Updates aktivieren.
-- Secret Scanning aktivieren, falls im GitHub-Plan verfügbar.
-- Code Scanning Alerts für CodeQL prüfen.
-- Einen privaten Sicherheitskontakt festlegen, falls GitHub Security Advisories nicht genutzt werden sollen.
+- Erledigt: Private Vulnerability Reporting ist aktiviert.
+- Erledigt: Dependabot Security Updates sind aktiviert.
+- Erledigt: Secret Scanning und Push Protection sind aktiviert.
+- Erledigt: CodeQL-Workflow ist vorhanden; Code Scanning läuft nach GitHub Actions.
+- Offen: Einen privaten Sicherheitskontakt ergänzen, falls GitHub Security Advisories nicht ausreichen.
 
 ## Lizenz
 
@@ -40,10 +40,10 @@ Diese Punkte erfordern Maintainer-Rechte, externe Plattformentscheidungen oder r
 
 ## Releases
 
-- Erstes Release ist als `v0.1.0` vorgesehen.
+- Erledigt: erstes Release ist als `v0.1.0` vorgesehen.
 - Versionierungsmodell: SemVer über GitHub Release Tags.
-- `CHANGELOG.md` aus `Unreleased` in einen Release-Abschnitt überführen.
-- Release Notes aus den tatsächlichen Änderungen schreiben.
+- Erledigt: `CHANGELOG.md` enthält den Abschnitt `0.1.0 - 2026-05-24`.
+- Offen: GitHub Release nach Push des aktuellen Commits erstellen, falls noch nicht vorhanden.
 
 ## Paket- oder Image-Verteilung
 
