@@ -6,6 +6,10 @@ Neue Einträge landen zuerst unter `Unreleased`.
 
 ## Unreleased
 
+Noch keine Änderungen.
+
+## 0.1.1 - 2026-05-24
+
 ### Security
 
 - GitHub Actions auf Node-24-kompatible Major-Versionen aktualisiert: `actions/checkout@v6`, `actions/setup-python@v6`, `github/codeql-action@v4`.
