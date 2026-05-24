@@ -1,0 +1,30 @@
+name: Documentation issue
+description: Report unclear, missing, or outdated documentation.
+title: "docs: "
+labels: ["documentation"]
+body:
+  - type: input
+    id: location
+    attributes:
+      label: Document or section
+      placeholder: README.md#quick-start
+    validations:
+      required: true
+  - type: textarea
+    id: issue
+    attributes:
+      label: What is unclear or wrong?
+    validations:
+      required: true
+  - type: textarea
+    id: suggested
+    attributes:
+      label: Suggested wording or fix
+      description: Optional, but concrete wording is helpful.
+  - type: checkboxes
+    id: safety
+    attributes:
+      label: Safety
+      options:
+        - label: This documentation request does not include secrets, private URLs, or personal data.
+          required: true

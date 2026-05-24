@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Security report
+    url: https://github.com/adrianweidig/codex-openai-bridge/blob/main/SECURITY.md
+    about: Please do not disclose sensitive security details in public issues.
+  - name: Support guide
+    url: https://github.com/adrianweidig/codex-openai-bridge/blob/main/SUPPORT.md
+    about: Read this before opening a usage question or troubleshooting issue.

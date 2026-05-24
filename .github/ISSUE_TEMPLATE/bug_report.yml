@@ -1,0 +1,81 @@
+name: Bug report
+description: Report a reproducible bridge, Docker, streaming, or OpenWebUI integration bug.
+title: "bug: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to report a bug. Do not include API keys, tokens, prompts, private files, or full sensitive logs.
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: What failed?
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Reproduction steps
+      description: List the smallest set of steps that reproduces the issue.
+      placeholder: |
+        1. Start the bridge with ...
+        2. Send request ...
+        3. Observe ...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+    validations:
+      required: true
+  - type: input
+    id: endpoint
+    attributes:
+      label: Endpoint
+      placeholder: /v1/responses, /v1/chat/completions, /v1/models, /health
+  - type: dropdown
+    id: startup
+    attributes:
+      label: Startup path
+      options:
+        - install.sh
+        - docker compose
+        - existing OpenWebUI stack override
+        - direct Python run
+        - other
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: OS, Docker/Compose availability, OpenWebUI setup, Python version, and relevant non-secret env names.
+      placeholder: |
+        OS:
+        Docker:
+        OpenWebUI:
+        CODEX_BRIDGE_* variables used, without values:
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant logs
+      description: Paste shortened logs only after removing secrets, prompts, tokens, private paths, and personal data.
+      render: text
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Checks
+      options:
+        - label: I removed secrets, tokens, prompts, and private data from this issue.
+          required: true
+        - label: I checked README.md, docs/FAQ.md, and SUPPORT.md.
+          required: true

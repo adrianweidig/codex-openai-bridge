@@ -1,0 +1,58 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="420" viewBox="0 0 1200 420" role="img" aria-labelledby="title desc">
+  <title id="title">Codex OpenAI Bridge architecture</title>
+  <desc id="desc">A local bridge connects OpenWebUI to the Codex CLI through OpenAI-compatible HTTP endpoints.</desc>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#0f172a"/>
+      <stop offset="0.58" stop-color="#12343b"/>
+      <stop offset="1" stop-color="#14532d"/>
+    </linearGradient>
+    <linearGradient id="line" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#38bdf8"/>
+      <stop offset="1" stop-color="#86efac"/>
+    </linearGradient>
+    <filter id="shadow" x="-20%" y="-30%" width="140%" height="160%">
+      <feDropShadow dx="0" dy="12" stdDeviation="16" flood-color="#020617" flood-opacity="0.35"/>
+    </filter>
+  </defs>
+  <rect width="1200" height="420" rx="0" fill="url(#bg)"/>
+  <g opacity="0.16" fill="none" stroke="#e2e8f0" stroke-width="1">
+    <path d="M80 72h1040M80 132h1040M80 192h1040M80 252h1040M80 312h1040"/>
+    <path d="M170 40v340M350 40v340M530 40v340M710 40v340M890 40v340M1070 40v340"/>
+  </g>
+  <g fill="#e5f4ff">
+    <text x="72" y="92" font-family="Inter,Segoe UI,Arial,sans-serif" font-size="44" font-weight="700">Codex OpenAI Bridge</text>
+    <text x="72" y="132" font-family="Inter,Segoe UI,Arial,sans-serif" font-size="19" fill="#cbd5e1">Lokale Codex CLI als OpenAI-kompatibler Responses-Provider für OpenWebUI</text>
+  </g>
+  <g filter="url(#shadow)">
+    <rect x="82" y="210" width="250" height="92" rx="14" fill="#f8fafc"/>
+    <text x="114" y="250" font-family="Inter,Segoe UI,Arial,sans-serif" font-size="22" font-weight="700" fill="#0f172a">OpenWebUI</text>
+    <text x="114" y="278" font-family="Inter,Segoe UI,Arial,sans-serif" font-size="15" fill="#475569">Chat UI und Provider</text>
+    <rect x="474" y="190" width="252" height="132" rx="14" fill="#ecfeff"/>
+    <text x="506" y="235" font-family="Inter,Segoe UI,Arial,sans-serif" font-size="22" font-weight="700" fill="#0f172a">Bridge Server</text>
+    <text x="506" y="264" font-family="Inter,Segoe UI,Arial,sans-serif" font-size="15" fill="#475569">/v1/models</text>
+    <text x="506" y="286" font-family="Inter,Segoe UI,Arial,sans-serif" font-size="15" fill="#475569">/v1/responses + SSE</text>
+    <rect x="866" y="210" width="250" height="92" rx="14" fill="#f0fdf4"/>
+    <text x="898" y="250" font-family="Inter,Segoe UI,Arial,sans-serif" font-size="22" font-weight="700" fill="#0f172a">Codex CLI</text>
+    <text x="898" y="278" font-family="Inter,Segoe UI,Arial,sans-serif" font-size="15" fill="#475569">codex exec --json</text>
+  </g>
+  <g fill="none" stroke="url(#line)" stroke-width="5" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M342 256h112"/>
+    <path d="M726 256h120"/>
+  </g>
+  <g fill="#86efac">
+    <path d="M454 256l-16-10v20z"/>
+    <path d="M846 256l-16-10v20z"/>
+  </g>
+  <g font-family="Inter,Segoe UI,Arial,sans-serif" font-size="14" fill="#dbeafe">
+    <text x="362" y="236">OpenAI-kompatibel</text>
+    <text x="752" y="236">lokaler Lauf</text>
+  </g>
+  <g font-family="Inter,Segoe UI,Arial,sans-serif" font-size="14" fill="#bbf7d0">
+    <text x="74" y="368">Streaming Events</text>
+    <text x="238" y="368">Secret Redaction</text>
+    <text x="410" y="368">Docker Compose</text>
+    <text x="594" y="368">Portainer-ready</text>
+    <text x="778" y="368">Stateless Bridge</text>
+  </g>
+</svg>
