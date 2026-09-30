@@ -1,5 +1,8 @@
 # Codex OpenAI Bridge
 
+> ab 26.07.2026 keine Änderungen mehr - aktueller Freeze-Zustand und keine weitere Bearbeitung
+
+
 ![Codex OpenAI Bridge architecture](docs/assets/codex-openai-bridge-hero.svg)
 
 Ein schlanker OpenAI-kompatibler Bridge-Server, der die Codex CLI als lokalen OpenWebUI-Provider nutzbar macht.
